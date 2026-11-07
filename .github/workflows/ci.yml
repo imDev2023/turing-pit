@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       attempt:
-        description: How many runs in a row have waited for the house's devnet SOL (the deploy job starts the next one, up to 10)
+        description: How many runs in a row have tried to deploy, waiting for the house's devnet SOL or after a failure (the deploy job starts the next one, up to 10)
         required: false
         default: "1"
 
@@ -237,11 +237,16 @@ jobs:
         env:
           PIT_SEED: ${{ secrets.PIT_SEED }}
         run: |
-          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" > "$RUNNER_TEMP/addresses.json"
-          echo "PROGRAM_ID=$(node -p "require('$RUNNER_TEMP/addresses.json').programId")" >> "$GITHUB_ENV"
-          echo "AUTHORITY=$(node -p "require('$RUNNER_TEMP/addresses.json').authority")" >> "$GITHUB_ENV"
+          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" \
+            "$RUNNER_TEMP/buffer-keypair.json" > "$RUNNER_TEMP/addresses.json"
+          {
+            echo "PROGRAM_ID=$(node -p "require('$RUNNER_TEMP/addresses.json').programId")"
+            echo "AUTHORITY=$(node -p "require('$RUNNER_TEMP/addresses.json').authority")"
+            echo "DEPLOY_BUFFER=$(node -p "require('$RUNNER_TEMP/addresses.json').deployBuffer")"
+          } >> "$GITHUB_ENV"
 
       - name: Deploy the program to devnet
+        id: deploy
         timeout-minutes: 320
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -249,8 +254,11 @@ jobs:
         run: |
           set -o pipefail
           solana config set -u devnet > /dev/null
-          if solana program dump "$PROGRAM_ID" /tmp/onchain.so > /dev/null 2>&1 && \
-             python3 -c "import sys; a=open('/tmp/onchain.so','rb').read(); b=open('target/deploy/turing_pit.so','rb').read(); sys.exit(0 if a[:len(b)]==b and not a[len(b):].strip(b'\0') else 1)"; then
+          matches() {
+            solana program dump "$PROGRAM_ID" /tmp/onchain.so > /dev/null 2>&1 && \
+              python3 -c "import sys; a=open('/tmp/onchain.so','rb').read(); b=open('target/deploy/turing_pit.so','rb').read(); sys.exit(0 if a[:len(b)]==b and not a[len(b):].strip(b'\0') else 1)"
+          }
+          if matches; then
             echo "The program on devnet already matches this build." | tee ci-out/deploy.log
             exit 0
           fi
@@ -260,17 +268,20 @@ jobs:
           # Checked on a local validator: rent + 0.05 SOL deploys; the real fees were 0.0014 SOL.
           size=$(stat -c %s target/deploy/turing_pit.so)
           need=$(( (size + 173) * 6960 + 100000000 ))
-          balance() { local b; b=$(solana balance --lamports 2>/dev/null | cut -d' ' -f1) || true; case "$b" in ''|*[!0-9]*) echo 0;; *) echo "$b";; esac; }
+          balance() { local b; b=$(solana balance "$1" --lamports 2>/dev/null | cut -d' ' -f1) || true; case "$b" in ''|*[!0-9]*) echo 0;; *) echo "$b";; esac; }
+          # The house's SOL, plus whatever an interrupted deploy left in the deploy buffer: the next
+          # deploy carries on from that buffer instead of paying for a new one.
+          funds() { echo $(( $(balance "$AUTHORITY") + $(balance "$DEPLOY_BUFFER") )); }
           started=$(date +%s); published=0; asked=0
           while true; do
-            have=$(balance)
+            have=$(funds)
             [ "$have" -ge "$need" ] && break
             now=$(date +%s)
             if [ $(( now - asked )) -ge 120 ]; then
               # The public faucet rarely answers GitHub's runners, but it costs nothing to ask.
               solana airdrop 2 > /dev/null 2>&1 || solana airdrop 1 > /dev/null 2>&1 || true
               asked=$now
-              have=$(balance)
+              have=$(funds)
               [ "$have" -ge "$need" ] && break
             fi
             if [ $(( now - published )) -ge 300 ]; then
@@ -287,24 +298,43 @@ jobs:
               published=$now
             fi
             if [ $(( now - started )) -gt 18000 ]; then
-              # A job can't run longer than 6 hours, so a new run takes over the wait (and cancels this one).
+              # A job can't run longer than 6 hours, so a new run takes over the wait (the last step).
               echo "No devnet SOL at $AUTHORITY after 5 hours (attempt $ATTEMPT of 10)" | tee ci-out/deploy.log
-              if [ "$ATTEMPT" -lt 10 ]; then
-                gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref main -f attempt=$(( ATTEMPT + 1 )) 2>&1 | tee -a ci-out/deploy.log
-              fi
               exit 1
             fi
             sleep 30
           done
-          echo "house balance before deploy: $have lamports" | tee ci-out/deploy.log
-          solana program deploy target/deploy/turing_pit.so \
-            --program-id "$RUNNER_TEMP/program-keypair.json" \
-            --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log
+          echo "house funds before deploy: $have lamports" | tee ci-out/deploy.log
+          # A buffer left by a build of another size can't be carried on from: its rent goes back first.
+          left=$(solana program show "$DEPLOY_BUFFER" --output json 2>/dev/null |
+            python3 -c "import json, sys; print(json.load(sys.stdin)['dataLen'])" 2>/dev/null) || left=""
+          if [ -n "$left" ] && [ "$left" != "$size" ]; then
+            solana program close "$DEPLOY_BUFFER" 2>&1 | tee -a ci-out/deploy.log || true
+          fi
+          # The buffer's keypair derives from PIT_SEED, so when devnet drops writes partway, the next
+          # try (or the next run) carries on from what was written, and the CLI never prints a
+          # recovery phrase for a throwaway buffer into this public log.
+          for try in 1 2 3; do
+            if solana program deploy target/deploy/turing_pit.so \
+                 --program-id "$RUNNER_TEMP/program-keypair.json" --buffer "$RUNNER_TEMP/buffer-keypair.json" \
+                 --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log; then
+              exit 0
+            fi
+            sleep 30
+            # The deploy may have landed even though the CLI gave up waiting for its confirmation.
+            if matches; then
+              echo "The program is on devnet after all." | tee -a ci-out/deploy.log
+              exit 0
+            fi
+            echo "Deploy try $try of 3 failed." | tee -a ci-out/deploy.log
+          done
+          exit 1
 
       # A new shift replaces the running one, so the house restarts on this commit's code. This
       # doesn't rely on runner.yml listening for CI to finish: once this run was itself started by
       # the workflow token (a later attempt of the SOL wait), that event may not start anything.
       - name: Start the house
+        id: start
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -334,3 +364,19 @@ jobs:
             if [ -n "${PROGRAM_ID:-}" ]; then echo "program account: $(solana account "$PROGRAM_ID" -u devnet 2>&1 | head -3 | tr '\n' ' ')"; fi
           } > ci-out/status.txt
           scripts/publish-branch.sh ci-build ci-out
+
+      # Still no SOL after 5 hours, a deploy that kept failing, or a hiccup before the house started:
+      # a new run carries on (a job can't run longer than 6 hours), up to 10 runs in a row. It
+      # cancels this one, so this step comes last.
+      - name: Hand over to a new run
+        if: failure() && (steps.deploy.outcome != 'success' || steps.start.outcome != 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt || '1' }}
+        run: |
+          if [ "$ATTEMPT" -lt 10 ]; then
+            gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref main -f attempt=$(( ATTEMPT + 1 ))
+            echo "Started attempt $(( ATTEMPT + 1 )) of 10."
+          else
+            echo "Stopped after 10 runs in a row: push a commit or run CI by hand to try again."
+          fi

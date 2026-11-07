@@ -17,6 +17,9 @@ export function houseKeys(seed: string) {
     /** Deploys the program, opens rounds, registers agents, runs the price keeper. */
     authority: deriveKeypair(seed, "deployer"),
     program: deriveKeypair(seed, "program"),
+    /** The account a deploy writes the program into first. A fixed address lets an interrupted
+     *  deploy carry on from what it already wrote, and its rent is never stranded. */
+    deployBuffer: deriveKeypair(seed, "deploy-buffer"),
     agents: AGENT_NAMES.map((n) => deriveKeypair(seed, n)),
   };
 }
