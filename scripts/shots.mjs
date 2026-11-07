@@ -184,7 +184,10 @@ async function walkthrough() {
     `<h1>Turing Pit</h1><p><b class="m">Three Claude agents</b> and <b class="h">anyone with a wallet</b> trade SOL, BTC and ETH in fifteen-minute rounds on Solana devnet.</p>`,
   );
   await wait(0.8);
-  await cdp.send("Page.startScreencast", { format: "jpeg", quality: 92, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 });
+  const SCREENCAST = { format: "jpeg", quality: 92, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 };
+  /** Stretches when the recording was paused, left out of the video. */
+  const gaps = [];
+  await cdp.send("Page.startScreencast", SCREENCAST);
   const started = Date.now() / 1000;
   await wait(4.5);
   await card(p, "");
@@ -233,46 +236,60 @@ async function walkthrough() {
   const first = p.locator(".thoughts .thought").first();
   const tx = hasThoughts ? await first.locator("footer a").getAttribute("href") : null;
   const reason = hasThoughts ? ((await first.locator("blockquote").textContent()) ?? "").trim() : "";
+  const endCard = `<h1>Turing Pit</h1><p>Play at <b>${site}</b></p><p>Code at <b>github.com/imDev2023/turing-pit</b></p><p>Built for the MLH x Solana hackathon</p>`;
   if (tx) {
+    // Explorer reads the transaction over the public RPC, which can take a long time to answer a
+    // GitHub runner (429s). The recording pauses while Explorer loads, and the scene is left out
+    // if the memo never shows, so the video never sits on a loading page.
     await caption(p, "");
-    await card(p, `<p>And every reason is in its transaction on <b>Solana Explorer</b>.</p>`);
-    await wait(1.6);
-    try {
-      await p.goto(tx, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      await prepare(p);
-      await card(p, `<p>And every reason is in its transaction on <b>Solana Explorer</b>.</p>`);
-      // The memo is the reason's plain text, so look for its opening words.
-      const memo = reason.length >= 12 ? p.getByText(reason.slice(0, 32), { exact: false }).first() : p.getByText(/memo/i).first();
-      await memo.waitFor({ timeout: 25_000 });
-      await wait(2);
+    await wait(0.6);
+    await cdp.send("Page.stopScreencast");
+    const pausedAt = Date.now() / 1000;
+    let memo = null;
+    for (let attempt = 1; attempt <= 2 && !memo; attempt++) {
+      try {
+        await p.goto(tx, { waitUntil: "domcontentloaded", timeout: 45_000 });
+        // The memo is the reason's plain text, so look for its opening words.
+        const found = reason.length >= 12 ? p.getByText(reason.slice(0, 32), { exact: false }).first() : p.getByText(/memo/i).first();
+        await found.waitFor({ timeout: 60_000 });
+        memo = found;
+      } catch (e) {
+        console.log(`Explorer didn't show the memo (try ${attempt}): ${e.message.split("\n")[0]}`);
+      }
+    }
+    await prepare(p);
+    await card(p, memo ? `<p>And every reason is in its transaction on <b>Solana Explorer</b>.</p>` : endCard);
+    await p.waitForTimeout(800); // let the card fade in before the recording resumes
+    await cdp.send("Page.startScreencast", SCREENCAST);
+    gaps.push([pausedAt, Date.now() / 1000]);
+    if (memo) {
+      await wait(2.4);
       await card(p, "");
       await wait(1);
       await memo.evaluate((el) => el.setAttribute("data-wt", "memo"));
       await glide(p, '[data-wt="memo"]', 160, 1600);
       await caption(p, "The agent's reason, as an SPL Memo in the same transaction as its trade.");
       await wait(6);
-    } catch (e) {
-      console.log(`skipped the Explorer scene: ${e.message.split("\n")[0]}`);
+    } else {
+      console.log("left the Explorer scene out of the walkthrough");
     }
   }
 
   await caption(p, "");
-  await card(
-    p,
-    `<h1>Turing Pit</h1><p>Play at <b>${site}</b></p><p>Code at <b>github.com/imDev2023/turing-pit</b></p><p>Built for the MLH x Solana hackathon</p>`,
-  );
+  await card(p, endCard);
   await wait(5.5);
   await cdp.send("Page.stopScreencast");
   const ended = Date.now() / 1000;
   console.log(`walkthrough RPC errors: ${p.rpcErrors().join(", ") || "none"}`);
   await context.close();
 
-  // ffmpeg's concat demuxer takes each frame for as long as the page showed it.
-  const kept = frames.filter((f) => f.t >= started - 1);
+  // ffmpeg's concat demuxer takes each frame for as long as the page showed it, less any pause.
+  const paused = (a, b) => gaps.reduce((sum, [from, to]) => sum + Math.max(0, Math.min(b, to) - Math.max(a, from)), 0);
+  const kept = frames.filter((f) => f.t >= started - 1 && !gaps.some(([from, to]) => f.t > from && f.t < to));
   const lines = ["ffconcat version 1.0"];
   kept.forEach((f, i) => {
     const next = i + 1 < kept.length ? kept[i + 1].t : ended;
-    lines.push(`file '${f.file}'`, `duration ${Math.max(0.001, next - f.t).toFixed(4)}`);
+    lines.push(`file '${f.file}'`, `duration ${Math.max(0.001, next - f.t - paused(f.t, next)).toFixed(4)}`);
   });
   lines.push(`file '${kept.at(-1).file}'`);
   const list = join(framesDir, "list.ffconcat");
@@ -283,7 +300,7 @@ async function walkthrough() {
       "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", join(out, "walkthrough.mp4")],
     { stdio: "inherit" },
   );
-  console.log(`walkthrough.mp4: ${kept.length} frames over ${(ended - started).toFixed(1)} s`);
+  console.log(`walkthrough.mp4: ${kept.length} frames over ${(ended - started - paused(started, ended)).toFixed(1)} s`);
 }
 
 // Desktop: the first screen, the whole page and the main panels.
