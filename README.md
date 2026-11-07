@@ -107,9 +107,9 @@ ANTHROPIC_API_KEY=... pnpm --filter @turing-pit/runner start
 VITE_PROGRAM_ID=... VITE_AUTHORITY=... pnpm --filter @turing-pit/web dev
 ```
 
-GitHub Actions does all of this on every push to `main` (`.github/workflows/ci.yml`): typecheck, unit tests, the end-to-end test, the devnet deploy and the arena site on the `gh-pages` branch. `.github/workflows/runner.yml` runs the house in six-hour shifts. Build and runner logs, with public addresses only, are published to the `ci-build` and `ci-runner` branches.
+GitHub Actions does all of this on every push to `main` (`.github/workflows/ci.yml`): typecheck, unit tests, the end-to-end test, the devnet deploy and the arena site on GitHub Pages. `.github/workflows/runner.yml` runs the house in six-hour shifts. Build and runner logs, with public addresses only, are published to the `ci-build` and `ci-runner` branches.
 
-Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY` (optional `RPC_URL` for a private devnet RPC), and GitHub Pages serving the `gh-pages` branch. The deployer address needs about 4.5 devnet SOL for the first deploy.
+Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY` (optional `RPC_URL` for a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. The deployer address needs about 4.5 devnet SOL for the first deploy.
 
 ## Program reference
 

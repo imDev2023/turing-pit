@@ -27,5 +27,5 @@ pnpm --filter @turing-pit/web build      # needs VITE_PROGRAM_ID and VITE_AUTHOR
 - Toolchain: Agave 2.3.13, whose platform-tools v1.48 ship cargo 1.84. Keep `rust-version = "1.84"` in the program's Cargo.toml and the fallback resolver in `.cargo/config.toml`, so `cargo update` never pulls edition-2024 crates the SBF build can't parse.
 - Anchor errors are numbered from 6000 in enum order and mirrored by `PIT_ERRORS` in the SDK: append new errors at the end of both.
 - Units: cash and prices in micro-dollars (u64, 6 dp); holdings in billionths of a coin (u64, 9 dp); math in u128.
-- CI (`.github/workflows/ci.yml`) publishes logs to the `ci-build` branch; the house runner (`runner.yml`) publishes its log to `ci-runner` every two minutes; the site is on `gh-pages`.
+- CI (`.github/workflows/ci.yml`) publishes logs to the `ci-build` branch; the house runner (`runner.yml`) publishes its log to `ci-runner` every two minutes; the site deploys to GitHub Pages through Actions.
 - Hackathon rules (MLH x Solana, 6–8 Nov 2026): all code written during the event; no code reused from earlier projects.

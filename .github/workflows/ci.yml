@@ -22,6 +22,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    outputs:
+      has_seed: ${{ steps.keys.outputs.has_seed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -142,14 +144,11 @@ jobs:
           VITE_BASE: /${{ github.event.repository.name }}/
         run: set -o pipefail && pnpm --filter @turing-pit/web build 2>&1 | tail -15 | tee ci-out/web.log
 
-      - name: Publish the arena site to the gh-pages branch
+      - name: Package the arena site
         if: steps.keys.outputs.has_seed == 'true' && !cancelled()
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          touch apps/web/dist/.nojekyll
-          cp apps/web/dist/index.html apps/web/dist/404.html
-          scripts/publish-branch.sh gh-pages apps/web/dist
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
 
       - name: Publish CI status
         if: always()
@@ -166,3 +165,20 @@ jobs:
             if [ -n "${PROGRAM_ID:-}" ]; then echo "program account: $(solana account "$PROGRAM_ID" -u devnet 2>&1 | head -3 | tr '\n' ' ')"; fi
           } > ci-out/status.txt
           scripts/publish-branch.sh ci-build ci-out
+
+  pages:
+    # Needs Settings > Pages > Source set to "GitHub Actions". A failure here (for example before
+    # Pages is enabled) doesn't fail the run, so the house runner still restarts.
+    needs: build
+    if: needs.build.outputs.has_seed == 'true' && !cancelled()
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
