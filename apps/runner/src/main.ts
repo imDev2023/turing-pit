@@ -1,5 +1,6 @@
 // The house: keeps Pyth prices fresh, opens and closes rounds, and runs the AI agents.
 // Runs for DURATION_MIN minutes and exits, so a scheduled CI job can restart it.
+// Exit code 3 means the program isn't deployed yet, so there is nothing to restart for.
 
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { makeAgents } from "./agents.js";
@@ -17,7 +18,7 @@ async function main() {
   const program = await cfg.connection.getAccountInfo(cfg.programId);
   if (!program?.executable) {
     log("main", "the program is not deployed on this cluster yet; nothing to run");
-    return;
+    process.exit(3);
   }
   const balance = (await cfg.connection.getBalance(cfg.keys.authority.publicKey)) / LAMPORTS_PER_SOL;
   log("main", `house balance ${balance.toFixed(3)} SOL`);
@@ -34,6 +35,9 @@ async function main() {
   ]);
   log("main", "done");
 }
+
+// A stray rejection from a websocket or an RPC call must not take the whole house down.
+process.on("unhandledRejection", (e) => log("main", "unhandled rejection:", (e as Error)?.message ?? e));
 
 main().catch((e) => {
   console.error(e);

@@ -44,14 +44,22 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RPC_URL: ${{ secrets.RPC_URL }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
-          DURATION_MIN: "345"
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$PIT_SEED" ]; then echo "PIT_SEED is not set"; exit 0; fi
-          mkdir -p runner-out
+          mkdir -p runner-out && touch runner-out/runner.log
           (while sleep 120; do tail -n 3000 runner-out/runner.log > runner-out/recent.log 2>/dev/null; scripts/publish-branch.sh ci-runner runner-out > /dev/null 2>&1 || true; done) &
-          set -o pipefail
-          pnpm --filter @turing-pit/runner start 2>&1 | tee runner-out/runner.log
+          # Restart the house if it ever crashes, until this shift's time is up.
+          end=$(( $(date +%s) + 345 * 60 ))
+          while [ "$(date +%s)" -lt $(( end - 120 )) ]; do
+            export DURATION_MIN=$(( (end - $(date +%s)) / 60 ))
+            set +e
+            pnpm --silent --filter @turing-pit/runner start 2>&1 | tee -a runner-out/runner.log
+            code=${PIPESTATUS[0]}
+            set -e
+            [ "$code" = 3 ] && break
+            sleep 10
+          done
 
       - name: Publish the final log
         if: always()
