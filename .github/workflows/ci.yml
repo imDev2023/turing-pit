@@ -21,7 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 90
     outputs:
       has_seed: ${{ steps.keys.outputs.has_seed }}
     steps:
@@ -100,40 +100,54 @@ jobs:
             | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/build.log
           ls -l target/deploy/turing_pit.so | tee -a ci-out/build.log
 
-      - name: Fund the house wallet
-        if: steps.keys.outputs.has_seed == 'true'
-        run: |
-          solana config set -u devnet > /dev/null
-          for i in 1 2 3; do
-            balance=$(solana balance --lamports | cut -d' ' -f1)
-            [ "$balance" -ge 4000000000 ] && break
-            solana airdrop 2 > /dev/null 2>&1 || true
-            sleep 5
-          done
-          solana balance | tee ci-out/house-balance.txt
-
       - name: Deploy the program to devnet
         id: deploy
         if: steps.keys.outputs.has_seed == 'true'
+        timeout-minutes: 50
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          size=$(stat -c %s target/deploy/turing_pit.so)
+          solana config set -u devnet > /dev/null
           if solana program dump "$PROGRAM_ID" /tmp/onchain.so > /dev/null 2>&1 && \
              python3 -c "import sys; a=open('/tmp/onchain.so','rb').read(); b=open('target/deploy/turing_pit.so','rb').read(); sys.exit(0 if a[:len(b)]==b and not a[len(b):].strip(b'\0') else 1)"; then
             echo "The program on devnet already matches this build." | tee ci-out/deploy.log
-          else
-            # A first deploy holds the program and a same-size buffer at once; an upgrade needs only the buffer.
-            copies=2; solana program show "$PROGRAM_ID" > /dev/null 2>&1 && copies=1
-            need=$(( (size + 300) * 6960 * copies + 100000000 ))
+            exit 0
+          fi
+          # A first deploy holds the program and a same-size buffer at once; an upgrade needs only the
+          # buffer. Plus 0.3 SOL so the house can fund the agents and post prices.
+          size=$(stat -c %s target/deploy/turing_pit.so)
+          copies=2; solana program show "$PROGRAM_ID" > /dev/null 2>&1 && copies=1
+          need=$(( (size + 300) * 6960 * copies + 300000000 ))
+          started=$(date +%s); announced=0
+          while true; do
             have=$(solana balance --lamports | cut -d' ' -f1)
-            if [ "$have" -lt "$need" ]; then
-              echo "The house wallet $AUTHORITY has $have lamports and needs about $need to deploy. Fund it at https://faucet.solana.com" | tee ci-out/deploy.log
+            [ "$have" -ge "$need" ] && break
+            solana airdrop 2 > /dev/null 2>&1 || true
+            have=$(solana balance --lamports | cut -d' ' -f1)
+            [ "$have" -ge "$need" ] && break
+            if [ "$announced" = 0 ]; then
+              # Publish the house address right away, then keep waiting: the deploy goes ahead
+              # as soon as someone sends devnet SOL from https://faucet.solana.com
+              {
+                echo "commit: $GITHUB_SHA"
+                echo "state: waiting for devnet SOL (since $(date -u +%H:%M) UTC)"
+                echo "house: $AUTHORITY"
+                echo "program: $PROGRAM_ID"
+                echo "house balance: $(( have / 1000000 )) / $(( need / 1000000 )) milli-SOL needed"
+              } > ci-out/status.txt
+              scripts/publish-branch.sh ci-build ci-out || true
+              announced=1
+            fi
+            if [ $(( $(date +%s) - started )) -gt 2700 ]; then
+              echo "Gave up after 45 minutes waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
               exit 1
             fi
-            solana program deploy target/deploy/turing_pit.so \
-              --program-id "$RUNNER_TEMP/program-keypair.json" \
-              --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee ci-out/deploy.log
-          fi
+            sleep 30
+          done
+          solana program deploy target/deploy/turing_pit.so \
+            --program-id "$RUNNER_TEMP/program-keypair.json" \
+            --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee ci-out/deploy.log
 
       - name: Build the arena site
         if: steps.keys.outputs.has_seed == 'true' && !cancelled()
