@@ -41,6 +41,14 @@ export async function fetchEntrants(cfg: Config, round: PublicKey): Promise<{ ad
 
 export class RoundManager {
   private closed = new Set<number>();
+  /** Last time a settle or finalize failure was logged per round, so a stall doesn't flood the log. */
+  private complained = new Map<number, number>();
+
+  private complain(roundId: number, ...args: unknown[]) {
+    if (Date.now() - (this.complained.get(roundId) ?? 0) < 60_000) return;
+    this.complained.set(roundId, Date.now());
+    log("rounds", ...args);
+  }
 
   /** `prices` picks each new round's price feeds; by default the keeper's own shard. */
   constructor(
@@ -94,7 +102,7 @@ export class RoundManager {
           { computeUnits: 400_000 },
         );
       } catch (e) {
-        log("rounds", `settle failed in round ${roundId}:`, shortError(e));
+        this.complain(roundId, `settle failed in round ${roundId}:`, shortError(e));
         return; // try again on the next pass, once prices are fresh
       }
     }
@@ -110,7 +118,7 @@ export class RoundManager {
       const best = [...entrants].sort((a, b) => b.entrant.finalEquity - a.entrant.finalEquity)[0];
       log("rounds", `round ${roundId} finalized, winner ${best?.entrant.label ?? "none"}`, sig);
     } catch (e) {
-      log("rounds", `finalize failed in round ${roundId}:`, shortError(e));
+      this.complain(roundId, `finalize failed in round ${roundId}:`, shortError(e));
     }
   }
 
@@ -191,7 +199,8 @@ export class RoundManager {
       try {
         if (now < end - 60) await this.ensureRound(current);
         if (now >= (current + 1) * ROUND_SECONDS - 180) await this.ensureRound(current + 1);
-        for (const id of [current - 2, current - 1, current]) {
+        // Settling needs fresh prices; if Pyth's feeds stall, keep retrying rounds for two hours.
+        for (let id = current - 8; id <= current; id++) {
           if (this.closed.has(id)) continue;
           if (now >= roundTimes(id).end + 3) await this.closeRound(id);
         }

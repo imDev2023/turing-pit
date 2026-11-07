@@ -46,6 +46,7 @@ jobs:
           PYTH_API_KEY: ${{ secrets.PYTH_API_KEY }}
           RPC_URL: ${{ secrets.RPC_URL }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+          AGENT_INTERVAL_MS: ${{ vars.AGENT_INTERVAL_MS }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$PIT_SEED" ]; then echo "PIT_SEED is not set"; exit 0; fi
