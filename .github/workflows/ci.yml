@@ -315,19 +315,23 @@ jobs:
           # The buffer's keypair derives from PIT_SEED, so when devnet drops writes partway, the next
           # try (or the next run) carries on from what was written, and the CLI never prints a
           # recovery phrase for a throwaway buffer into this public log.
-          for try in 1 2 3; do
-            if solana program deploy target/deploy/turing_pit.so \
+          # The ~260 writes go straight to the leaders over QUIC. The public RPC allows each address
+          # only a few requests a second and GitHub's runners share addresses: sending the writes
+          # through it (--use-rpc) got this runner rate-limited (429) after ten writes and the CLI
+          # stalled. A try that hangs is stopped after 15 minutes, and the next carries on.
+          for try in 1 2 3 4 5 6; do
+            if timeout 15m solana program deploy target/deploy/turing_pit.so \
                  --program-id "$RUNNER_TEMP/program-keypair.json" --buffer "$RUNNER_TEMP/buffer-keypair.json" \
-                 --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log; then
+                 --with-compute-unit-price 100000 --max-sign-attempts 10 2>&1 | tee -a ci-out/deploy.log; then
               exit 0
             fi
-            sleep 30
+            sleep 60
             # The deploy may have landed even though the CLI gave up waiting for its confirmation.
             if matches; then
               echo "The program is on devnet after all." | tee -a ci-out/deploy.log
               exit 0
             fi
-            echo "Deploy try $try of 3 failed." | tee -a ci-out/deploy.log
+            echo "Deploy try $try of 6 failed." | tee -a ci-out/deploy.log
           done
           exit 1
 
