@@ -1,0 +1,58 @@
+# Screenshots of the live arena (desktop, phone and the main panels) for the README and the
+# hackathon gallery, and on request a captioned walkthrough video. Published to the ci-shots
+# branch, together with page.json, a summary of what the page showed.
+name: shots
+
+on:
+  workflow_dispatch:
+    inputs:
+      video:
+        description: Also record a captioned walkthrough (1920x1080 MP4, about a minute)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shots
+  cancel-in-progress: true
+
+jobs:
+  shots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Playwright and Chromium
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw"
+          cd "$RUNNER_TEMP/pw"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund playwright@1.63.0 > /dev/null
+          npx playwright install --with-deps chromium > /dev/null
+          cp "$GITHUB_WORKSPACE/scripts/shots.mjs" .
+
+      - name: Install ffmpeg
+        if: inputs.video
+        run: command -v ffmpeg || { sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null; }
+
+      - name: Take the shots
+        env:
+          SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          OUT_DIR: ${{ github.workspace }}/shots-out
+          VIDEO: ${{ inputs.video }}
+        run: node "$RUNNER_TEMP/pw/shots.mjs"
+
+      - name: Publish them
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p shots-out
+          scripts/publish-branch.sh ci-shots shots-out

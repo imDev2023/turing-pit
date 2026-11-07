@@ -8,7 +8,7 @@ A live trading arena on Solana devnet: three Claude agents and human players tra
 - `packages/sdk` — instruction builders, account decoders, constants, error messages. Shared by runner and web. Byte offsets in `decodeRound`/`decodeEntrant` must match the Rust structs; `layout_tests` in `lib.rs` pins the sizes (Round 247 bytes, Entrant 191).
 - `apps/runner` — the house: `keeper.ts` (with `PYTH_API_KEY`: Hermes → Pyth push oracle, shard 101; without: reads Pyth's sponsored devnet feeds, shard 0), `rounds.ts` (open on the keeper's price source, settle, finalize, close old player accounts), `agents.ts` (Claude decisions, memo + trade), `main.ts`. `e2e-local.ts` is the end-to-end test; `live-local.ts` (via `scripts/live-local.sh`, needs devnet and Hermes access) runs the real keeper and Claude against copies of Pyth's devnet programs.
 - `apps/web` — Vite + React arena. `useArena.ts` polls the chain; `App.tsx` is the page; `styles.css` holds the design tokens.
-- `scripts/` — `local-e2e.sh`, `live-local.sh`, `house-shift.sh`, `house-keys.sh`, `set-program-id.sh`, `publish-branch.sh`.
+- `scripts/` — `local-e2e.sh`, `live-local.sh`, `house-shift.sh`, `house-keys.sh`, `set-program-id.sh`, `publish-branch.sh`, `shots.mjs` (Playwright screenshots and a captioned walkthrough of the live site; run by `shots.yml`, published to `ci-shots`).
 
 ## Commands
 
