@@ -123,6 +123,7 @@ export class Agent {
       .map((e) => ({ label: e.label, kind: e.kind === KIND_AGENT ? "AI" : "human", equity: equityOf(e, prices) }))
       .sort((a, b) => b.equity - a.equity);
     const rank = board.findIndex((b) => b.label === me.label) + 1;
+    const room = ASSETS.map((_, i) => Math.max(0, this.buyRoom(me, prices, equity, i)));
     const lines = [
       `Time left in the round: ${Math.floor(secondsLeft / 60)}m ${secondsLeft % 60}s.`,
       "Pyth prices now (% change over 1 and 5 minutes; how long ago the price was published):",
@@ -135,6 +136,8 @@ export class Agent {
       `Trades fill at the latest published price while it is under ${maxPriceAge}s old.` +
         (maxPriceAge > PRICE_AGE_KEEPER ? " These devnet feeds publish about every 5 minutes, so a price a few minutes old is normal." : ""),
       `Your cash: $${fmt(me.cash)}. Holdings: ${ASSETS.map((a, i) => `${a} ${fmt(me.qty[i], 6)} ($${fmt(me.qty[i] * prices[i])})`).join(", ")}.`,
+      `The most you can buy right now (your cash, and at most ${MAX_ASSET_BPS / 100}% of your equity in one coin): ` +
+        `${ASSETS.map((a, i) => `${a} $${fmt(room[i])}`).join(", ")}. Orders under $${MIN_TRADE_USD} are refused.`,
       `Your equity: $${fmt(equity)} (started at $10,000.00). Rank ${rank} of ${board.length}.`,
       "Leaderboard:",
       ...board.slice(0, 5).map((b, i) => `  ${i + 1}. ${b.label} (${b.kind}) $${fmt(b.equity)}`),
@@ -171,6 +174,13 @@ export class Agent {
     };
   }
 
+  /** Dollars of coin `i` the agent can still buy: its cash, and the program's cap per coin (with a
+   *  little margin, since the price can move before the trade lands). */
+  private buyRoom(me: Entrant, prices: [number, number, number], equity: number, i: number): number {
+    const position = me.qty[i] * prices[i];
+    return Math.min(me.cash, ((equity * MAX_ASSET_BPS) / 10_000 - position) * 0.98);
+  }
+
   /** Clamps a decision to what the program will accept. Returns null when there is nothing to do. */
   private clamp(d: Decision, me: Entrant, prices: [number, number, number]): { asset: Asset; side: number; usd: number } | null {
     if (d.action === "hold" || !d.asset || !d.usd) return null;
@@ -178,10 +188,9 @@ export class Agent {
     if (i < 0) return null;
     const equity = equityOf(me, prices);
     if (d.action === "buy") {
-      const position = me.qty[i] * prices[i];
-      const room = (equity * MAX_ASSET_BPS) / 10_000 - position;
-      const usd = Math.min(d.usd, me.cash, room * 0.98);
-      return usd >= MIN_TRADE_USD ? { asset: d.asset, side: SIDE_BUY, usd } : null;
+      const usd = Math.min(d.usd, this.buyRoom(me, prices, equity, i));
+      // An order cut to a fraction of its size is no longer the trade its reason describes.
+      return usd >= MIN_TRADE_USD && usd >= d.usd / 2 ? { asset: d.asset, side: SIDE_BUY, usd } : null;
     }
     const held = me.qty[i] * prices[i];
     if (held < MIN_TRADE_USD) return null;
@@ -222,10 +231,13 @@ export class Agent {
     }
     if (!decision) return;
     const order = this.clamp(decision, me, prices);
-    this.recent.push(`${decision.action}${decision.asset ? " " + decision.asset : ""}${order ? ` $${Math.round(order.usd)}` : ""}`);
+    const wanted = `${decision.action} ${decision.asset ?? "?"} $${Math.round(decision.usd ?? 0)}`;
+    this.recent.push(
+      decision.action === "hold" ? "hold" : order ? `${decision.action} ${order.asset} $${Math.round(order.usd)}` : `${wanted} (not placed: outside the limits)`,
+    );
     if (this.recent.length > 6) this.recent.shift();
     if (!order) {
-      log(this.label, `holds: ${decision.reason}`);
+      log(this.label, decision.action === "hold" ? `holds: ${decision.reason}` : `can't ${wanted} within the limits, so holds: ${decision.reason}`);
       return;
     }
     // The program refuses fills at prices older than the round allows; don't pay for a failed trade.

@@ -1,8 +1,8 @@
 # Runs the house on a GitHub runner: keeps Pyth prices fresh on devnet, opens and settles a
 # round every 15 minutes, and runs the three Claude agents. A shift lasts about 5 h 40 min and
-# ends five minutes into a round, when it starts the next shift itself. CI starts a shift after
-# each deploy (also when the program on devnet already matches the build), which replaces the
-# running one, so the house restarts on the new code. Both use workflow_dispatch, the one event
+# ends five minutes into a round, when it starts the next shift itself. After each push, CI starts
+# a shift that replaces the running one when the house code changed (or no shift is running), so
+# the house restarts on the new code. Both use workflow_dispatch, the one event
 # the workflow token can always start runs with. The schedule is only a watchdog: it starts a
 # shift when none is running and never replaces one.
 name: runner

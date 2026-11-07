@@ -400,6 +400,7 @@ async function main() {
     check("the agent joined the live round", !!mine, "not joined");
     check("the agent traded on its decision", !!mine && Math.abs(mine.entrant.qty[0] * PRICES[0] - 2497.5) < 0.01, mine?.entrant.qty);
     check("the prompt carries prices and the board", prompt.includes("SOL: $187.42") && prompt.includes("Leaderboard"), prompt);
+    check("the prompt says how much the agent can still buy", prompt.includes("The most you can buy right now") && prompt.includes("SOL $4,900.00"), prompt);
   }
   const all = await connection.getProgramAccounts(programId, { filters: [{ dataSize: ENTRANT_SIZE }] });
   check("entrant accounts are the size the client expects", all.length >= 2);
