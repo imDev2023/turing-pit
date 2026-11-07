@@ -1,7 +1,8 @@
 # Runs the house on a GitHub runner: keeps Pyth prices fresh on devnet, opens and settles a
-# round every 15 minutes, and runs the three Claude agents. Each shift lasts 5 h 45 min and the
-# schedule starts one every 5 hours (or 4, overnight), so shifts overlap and the newer one takes
-# over. A successful CI run restarts the house with the new code.
+# round every 15 minutes, and runs the three Claude agents. A shift lasts about 5 h 40 min and
+# ends five minutes into a round, when it starts the next shift itself. A successful CI run
+# restarts the house with the new code. The schedule is only a watchdog: it starts a shift when
+# none is running and never replaces one.
 name: runner
 
 on:
@@ -10,19 +11,43 @@ on:
     types: [completed]
     branches: [main]
   schedule:
-    - cron: "41 */5 * * *"
+    - cron: "41 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
-
-concurrency:
-  group: runner
-  cancel-in-progress: true
+  actions: write
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          go=true
+          if [ "$EVENT" = workflow_run ] && [ "$CI_CONCLUSION" != success ]; then go=false; fi
+          if [ "$EVENT" = schedule ]; then
+            # If the check itself fails, assume a shift is running rather than risk replacing it.
+            running=$(gh run list -R "$GITHUB_REPOSITORY" --workflow runner.yml --status in_progress \
+              --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length") || running=1
+            [ "${running:-1}" != 0 ] && go=false
+          fi
+          echo "event $EVENT, start a shift: $go"
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
   house:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
+    # One house at a time: a new shift cancels the one it replaces.
+    concurrency:
+      group: runner
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 358
     steps:
@@ -40,6 +65,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Run the house
+        id: house
         env:
           PIT_SEED: ${{ secrets.PIT_SEED }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -48,21 +74,7 @@ jobs:
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
           AGENT_INTERVAL_MS: ${{ vars.AGENT_INTERVAL_MS }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$PIT_SEED" ]; then echo "PIT_SEED is not set"; exit 0; fi
-          mkdir -p runner-out && touch runner-out/runner.log
-          (while sleep 120; do tail -n 3000 runner-out/runner.log > runner-out/recent.log 2>/dev/null; scripts/publish-branch.sh ci-runner runner-out > /dev/null 2>&1 || true; done) &
-          # Restart the house if it ever crashes, until this shift's time is up.
-          end=$(( $(date +%s) + 345 * 60 ))
-          while [ "$(date +%s)" -lt $(( end - 120 )) ]; do
-            export DURATION_MIN=$(( (end - $(date +%s)) / 60 ))
-            set +e
-            pnpm --silent --filter @turing-pit/runner start 2>&1 | tee -a runner-out/runner.log
-            code=${PIPESTATUS[0]}
-            set -e
-            [ "$code" = 3 ] && break
-            sleep 10
-          done
+        run: scripts/house-shift.sh
 
       - name: Publish the final log
         if: always()
@@ -72,3 +84,10 @@ jobs:
           mkdir -p runner-out && touch runner-out/runner.log
           tail -n 3000 runner-out/runner.log > runner-out/recent.log
           scripts/publish-branch.sh ci-runner runner-out
+
+      # A shift that was replaced (cancelled) must not start another one.
+      - name: Start the next shift
+        if: ${{ !cancelled() && steps.house.outputs.next == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run runner.yml -R "$GITHUB_REPOSITORY" --ref main

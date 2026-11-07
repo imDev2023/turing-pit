@@ -7,9 +7,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      attempt:
+        description: How many runs in a row have waited for the house's devnet SOL (the deploy step starts the next one, up to 10)
+        required: false
+        default: "1"
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: ci
@@ -119,6 +125,7 @@ jobs:
         timeout-minutes: 310
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt || '1' }}
         run: |
           set -o pipefail
           solana config set -u devnet > /dev/null
@@ -151,7 +158,7 @@ jobs:
               # ahead as soon as someone sends devnet SOL from https://faucet.solana.com
               {
                 echo "commit: $GITHUB_SHA"
-                echo "state: waiting for devnet SOL (since $(date -u -d @"$started" +%H:%M) UTC, gives up at $(date -u -d @$(( started + 18000 )) +%H:%M) UTC)"
+                echo "state: waiting for devnet SOL (since $(date -u -d @"$started" +%H:%M) UTC; at $(date -u -d @$(( started + 18000 )) +%H:%M) UTC this run, attempt $ATTEMPT of 10, hands over to a new one)"
                 echo "house: $AUTHORITY"
                 echo "program: $PROGRAM_ID"
                 echo "house balance: $(( have / 1000000 )) / $(( need / 1000000 )) milli-SOL needed (checked $(date -u +%H:%M) UTC)"
@@ -160,7 +167,11 @@ jobs:
               published=$now
             fi
             if [ $(( now - started )) -gt 18000 ]; then
-              echo "Gave up after 5 hours waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
+              # A job can't run longer than 6 hours, so a new run takes over the wait (and cancels this one).
+              echo "No devnet SOL at $AUTHORITY after 5 hours (attempt $ATTEMPT of 10)" | tee ci-out/deploy.log
+              if [ "$ATTEMPT" -lt 10 ]; then
+                gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref main -f attempt=$(( ATTEMPT + 1 )) 2>&1 | tee -a ci-out/deploy.log
+              fi
               exit 1
             fi
             sleep 30
