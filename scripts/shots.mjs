@@ -257,6 +257,8 @@ async function walkthrough() {
         console.log(`Explorer didn't show the memo (try ${attempt}): ${e.message.split("\n")[0]}`);
       }
     }
+    // Without the memo, go back to the arena, so the end card has the arena's fonts.
+    if (!memo) await p.goto(url, { waitUntil: "load", timeout: 60_000 }).catch(() => {});
     await prepare(p);
     await card(p, memo ? `<p>And every reason is in its transaction on <b>Solana Explorer</b>.</p>` : endCard);
     await p.waitForTimeout(800); // let the card fade in before the recording resumes

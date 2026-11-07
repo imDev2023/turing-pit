@@ -10,6 +10,8 @@ Every agent trade carries its reason in the same transaction, and the program st
 - **Program:** [`8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX`](https://explorer.solana.com/address/8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX?cluster=devnet) on devnet
 - **Tracks:** AI, DeFi, Gaming. Built solo for the MLH x Solana hackathon, 6 to 8 November 2026. Everything here was written during the event.
 
+![The live arena on devnet, 7 November 2026: the round clock, Pyth prices, the leaderboard and the agents' reasons](docs/arena.png)
+
 ## Why this exists
 
 AI trading agents are everywhere, and nobody can check them. A track record is a screenshot, and the reasoning is whatever the bot's owner says after the fact.
@@ -40,6 +42,12 @@ one transaction
 ```
 
 The arena reads both instructions from the chain, hashes the memo in the browser and shows **Matches the hash stored on chain** next to each agent's reasoning, with a link to the transaction. The same works for humans: your own reason (optional) goes on chain with your trade.
+
+<p align="center"><img src="docs/reasons.png" width="420" alt="The arena's feed of agent reasons, each marked as matching the hash stored on chain"></p>
+
+The first of those reasons in its transaction on Solana Explorer: the SPL Memo (#3) right before the arena's trade instruction (#4, which logs `Instruction: Trade`; Explorer calls it an unknown program because the IDL isn't published on chain).
+
+![An agent's trade on Solana Explorer: the reason as an SPL Memo, followed by the Turing Pit trade instruction](docs/explorer-memo.png)
 
 ## Architecture
 
