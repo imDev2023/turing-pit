@@ -11,7 +11,7 @@ use anchor_lang::prelude::*;
 pub mod math;
 use math::*;
 
-declare_id!("11111111111111111111111111111111");
+declare_id!("8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX");
 
 /// Pyth Solana Receiver: owns every verified PriceUpdateV2 account.
 pub const PYTH_RECEIVER_ID: Pubkey =

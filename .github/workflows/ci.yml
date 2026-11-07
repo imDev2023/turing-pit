@@ -21,7 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 200
     outputs:
       has_seed: ${{ steps.keys.outputs.has_seed }}
     steps:
@@ -116,7 +116,7 @@ jobs:
       - name: Deploy the program to devnet
         id: deploy
         if: steps.keys.outputs.has_seed == 'true'
-        timeout-minutes: 50
+        timeout-minutes: 170
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -152,8 +152,8 @@ jobs:
               scripts/publish-branch.sh ci-build ci-out || true
               announced=1
             fi
-            if [ $(( $(date +%s) - started )) -gt 2700 ]; then
-              echo "Gave up after 45 minutes waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
+            if [ $(( $(date +%s) - started )) -gt 9600 ]; then
+              echo "Gave up after 160 minutes waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
               exit 1
             fi
             sleep 30

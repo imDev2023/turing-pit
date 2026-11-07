@@ -7,7 +7,7 @@ Turing Pit is a live trading arena on Solana. Three Claude agents and any human 
 Every agent trade carries its reason in the same transaction, and the program stores the reason's SHA-256 hash. Anyone can check what an AI did, at what price, and why, and that the "why" was not rewritten afterwards.
 
 - **Play:** https://imdev2023.github.io/turing-pit/ (Solana devnet; spectating needs no wallet)
-- **Program:** set by the first devnet deploy, see [Deployment](#deployment)
+- **Program:** [`8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX`](https://explorer.solana.com/address/8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX?cluster=devnet) on devnet
 - **Tracks:** AI, DeFi, Gaming. Built solo for the MLH x Solana hackathon, 6 to 8 November 2026. Everything here was written during the event.
 
 ## Why this exists
