@@ -15,6 +15,9 @@ export interface PricePoint {
 
 export class PriceKeeper {
   readonly history: Record<Asset, PricePoint[]> = { SOL: [], BTC: [], ETH: [] };
+  /** Updates posted on chain since start, and the last error, for logs and tests. */
+  posted = 0;
+  lastError = "";
   private hermes: HermesClient;
   private receiver: PythSolanaReceiver;
   private failures = 0;
@@ -24,6 +27,7 @@ export class PriceKeeper {
     this.receiver = new PythSolanaReceiver({
       connection: cfg.connection,
       wallet: new Wallet(cfg.keys.authority),
+      treasuryId: cfg.pythTreasuryId,
     });
   }
 
@@ -77,11 +81,18 @@ export class PriceKeeper {
         const builder = this.receiver.newTransactionBuilder({ closeUpdateAccounts: true });
         await builder.addUpdatePriceFeed(update.binary.data, SHARD_ID);
         const txs = await builder.buildVersionedTransactions({ computeUnitPriceMicroLamports: 2_000 });
-        await this.receiver.provider.sendAll(txs, { skipPreflight: true, commitment: "confirmed" });
+        const sigs = await this.receiver.provider.sendAll(txs, { skipPreflight: true, commitment: "confirmed" });
         this.failures = 0;
+        this.posted++;
+        // A heartbeat in the log: the first update, then about every ten minutes.
+        if (this.posted === 1 || this.posted % 60 === 0) {
+          const prices = ASSETS.map((a) => `${a} $${this.latest(a)?.toFixed(2) ?? "?"}`).join(", ");
+          log("keeper", `posted update ${this.posted} (${prices}) in ${txs.length} transactions`, sigs[sigs.length - 1]);
+        }
       } catch (e) {
         this.failures++;
-        log("keeper", `update failed (${this.failures} in a row):`, (e as Error).message?.slice(0, 200));
+        this.lastError = (e as Error).message?.slice(0, 300) ?? String(e);
+        log("keeper", `update failed (${this.failures} in a row):`, this.lastError.slice(0, 200));
       }
       await sleep(Math.max(1_000, this.cfg.keeperIntervalMs - (Date.now() - started)));
     }

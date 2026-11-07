@@ -288,6 +288,7 @@ async function main() {
     durationMs: 0,
     keeperIntervalMs: 0,
     agentIntervalMs: 0,
+    pythTreasuryId: undefined,
   } satisfies Config;
   const secondsIn = Math.floor(Date.now() / 1000) % 900;
   if (secondsIn > 840 - 75) {

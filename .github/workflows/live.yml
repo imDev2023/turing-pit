@@ -1,0 +1,87 @@
+# Live-path test: the real price keeper (Hermes -> Pyth push oracle) and real Claude agents
+# against a local validator carrying copies of Pyth's and Wormhole's devnet programs. It checks
+# the parts the end-to-end test fakes, without spending devnet SOL. The log goes to the ci-live
+# branch. It doesn't gate the deploy.
+name: live-path
+
+on:
+  push:
+    branches: [main, live-test]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AGAVE_VERSION: v2.3.13
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare log folder
+        run: mkdir -p ci-out
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile > /dev/null
+
+      - name: Cache Solana toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/solana-release
+            ~/.cache/solana
+          key: agave-${{ env.AGAVE_VERSION }}-v1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-
+
+      - name: Install Solana CLI
+        run: |
+          if [ ! -x "$HOME/solana-release/bin/solana" ]; then
+            curl -sSfL -o /tmp/solana.tar.bz2 \
+              "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+            tar xjf /tmp/solana.tar.bz2 -C "$HOME"
+          fi
+          echo "$HOME/solana-release/bin" >> "$GITHUB_PATH"
+
+      - name: Live-path test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+        run: |
+          set -o pipefail
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > ci-out/status.txt
+          scripts/live-local.sh 2>&1 | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/live.log
+
+      - name: Publish the log
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ) (${{ job.status }})" >> ci-out/status.txt
+          scripts/publish-branch.sh ci-live ci-out

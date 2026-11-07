@@ -22,6 +22,8 @@ export function loadConfig() {
     durationMs: Number(env("DURATION_MIN", "340")) * 60_000,
     keeperIntervalMs: Number(env("KEEPER_INTERVAL_MS", "10000")),
     agentIntervalMs: Number(env("AGENT_INTERVAL_MS", "45000")),
+    /** Pins the Pyth receiver's fee treasury (0-255); by default each update picks one at random. */
+    pythTreasuryId: process.env.PYTH_TREASURY_ID ? Number(process.env.PYTH_TREASURY_ID) : undefined,
   };
 }
 
