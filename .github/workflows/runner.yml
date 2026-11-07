@@ -1,0 +1,63 @@
+# Runs the house on a GitHub runner: keeps Pyth prices fresh on devnet, opens and settles a
+# round every 15 minutes, and runs the three Claude agents. Each run lasts just under six hours;
+# the schedule starts the next one, and a successful CI run restarts it with the new code.
+name: runner
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runner
+  cancel-in-progress: true
+
+jobs:
+  house:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Run the house
+        env:
+          PIT_SEED: ${{ secrets.PIT_SEED }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RPC_URL: ${{ secrets.RPC_URL }}
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+          DURATION_MIN: "345"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$PIT_SEED" ]; then echo "PIT_SEED is not set"; exit 0; fi
+          mkdir -p runner-out
+          (while sleep 120; do tail -n 3000 runner-out/runner.log > runner-out/recent.log 2>/dev/null; scripts/publish-branch.sh ci-runner runner-out > /dev/null 2>&1 || true; done) &
+          set -o pipefail
+          pnpm --filter @turing-pit/runner start 2>&1 | tee runner-out/runner.log
+
+      - name: Publish the final log
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p runner-out && touch runner-out/runner.log
+          tail -n 3000 runner-out/runner.log > runner-out/recent.log
+          scripts/publish-branch.sh ci-runner runner-out

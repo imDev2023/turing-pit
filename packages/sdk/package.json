@@ -1,0 +1,19 @@
+{
+  "name": "@turing-pit/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@solana/web3.js": "^1.98.4",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,168 @@
+# Builds and tests everything, runs the end-to-end test on a local validator, deploys the
+# program to devnet and the arena site to GitHub Pages. Logs and public addresses go to the
+# ci-build branch so the build can be checked without access to the Actions tab.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci
+  cancel-in-progress: true
+
+env:
+  AGAVE_VERSION: v2.3.13
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare log folder
+        run: mkdir -p ci-out && echo "{}" > ci-out/steps.json
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile 2>&1 | tail -20 | tee ci-out/install.log
+
+      - name: Typecheck
+        run: set -o pipefail && pnpm -r typecheck 2>&1 | tee ci-out/typecheck.log
+
+      - name: Cache Solana toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/solana-release
+            ~/.cache/solana
+          key: agave-${{ env.AGAVE_VERSION }}-v1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-
+
+      - name: Install Solana CLI
+        run: |
+          if [ ! -x "$HOME/solana-release/bin/solana" ]; then
+            curl -sSfL -o /tmp/solana.tar.bz2 \
+              "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+            tar xjf /tmp/solana.tar.bz2 -C "$HOME"
+          fi
+          echo "$HOME/solana-release/bin" >> "$GITHUB_PATH"
+
+      - name: Program unit tests
+        run: set -o pipefail && cargo test --locked -p turing_pit --lib 2>&1 | tee ci-out/unit-tests.log
+
+      - name: End-to-end test on a local validator
+        run: set -o pipefail && scripts/local-e2e.sh 2>&1 | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/e2e.log
+
+      - name: House keys
+        id: keys
+        env:
+          PIT_SEED: ${{ secrets.PIT_SEED }}
+        run: |
+          if [ -z "$PIT_SEED" ]; then
+            echo "PIT_SEED is not set, so nothing is deployed. Add it under Settings > Secrets and variables > Actions." | tee ci-out/notice.txt
+            echo "has_seed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" > ci-out/addresses.json
+          echo "has_seed=true" >> "$GITHUB_OUTPUT"
+          echo "PROGRAM_ID=$(node -p 'require("./ci-out/addresses.json").programId')" >> "$GITHUB_ENV"
+          echo "AUTHORITY=$(node -p 'require("./ci-out/addresses.json").authority')" >> "$GITHUB_ENV"
+
+      - name: Build the program for devnet
+        if: steps.keys.outputs.has_seed == 'true'
+        run: |
+          set -o pipefail
+          scripts/set-program-id.sh "$PROGRAM_ID"
+          cargo-build-sbf --manifest-path programs/turing_pit/Cargo.toml -- --locked 2>&1 \
+            | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/build.log
+          ls -l target/deploy/turing_pit.so | tee -a ci-out/build.log
+
+      - name: Fund the house wallet
+        if: steps.keys.outputs.has_seed == 'true'
+        run: |
+          solana config set -u devnet > /dev/null
+          for i in 1 2 3; do
+            balance=$(solana balance --lamports | cut -d' ' -f1)
+            [ "$balance" -ge 4000000000 ] && break
+            solana airdrop 2 > /dev/null 2>&1 || true
+            sleep 5
+          done
+          solana balance | tee ci-out/house-balance.txt
+
+      - name: Deploy the program to devnet
+        id: deploy
+        if: steps.keys.outputs.has_seed == 'true'
+        run: |
+          set -o pipefail
+          size=$(stat -c %s target/deploy/turing_pit.so)
+          if solana program dump "$PROGRAM_ID" /tmp/onchain.so > /dev/null 2>&1 && \
+             python3 -c "import sys; a=open('/tmp/onchain.so','rb').read(); b=open('target/deploy/turing_pit.so','rb').read(); sys.exit(0 if a[:len(b)]==b and not a[len(b):].strip(b'\0') else 1)"; then
+            echo "The program on devnet already matches this build." | tee ci-out/deploy.log
+          else
+            # A first deploy holds the program and a same-size buffer at once; an upgrade needs only the buffer.
+            copies=2; solana program show "$PROGRAM_ID" > /dev/null 2>&1 && copies=1
+            need=$(( (size + 300) * 6960 * copies + 100000000 ))
+            have=$(solana balance --lamports | cut -d' ' -f1)
+            if [ "$have" -lt "$need" ]; then
+              echo "The house wallet $AUTHORITY has $have lamports and needs about $need to deploy. Fund it at https://faucet.solana.com" | tee ci-out/deploy.log
+              exit 1
+            fi
+            solana program deploy target/deploy/turing_pit.so \
+              --program-id "$RUNNER_TEMP/program-keypair.json" \
+              --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee ci-out/deploy.log
+          fi
+
+      - name: Build the arena site
+        if: steps.keys.outputs.has_seed == 'true' && !cancelled()
+        env:
+          VITE_PROGRAM_ID: ${{ env.PROGRAM_ID }}
+          VITE_AUTHORITY: ${{ env.AUTHORITY }}
+          VITE_RPC_URL: ${{ vars.PUBLIC_RPC_URL }}
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: set -o pipefail && pnpm --filter @turing-pit/web build 2>&1 | tail -15 | tee ci-out/web.log
+
+      - name: Publish the arena site to the gh-pages branch
+        if: steps.keys.outputs.has_seed == 'true' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          touch apps/web/dist/.nojekyll
+          cp apps/web/dist/index.html apps/web/dist/404.html
+          scripts/publish-branch.sh gh-pages apps/web/dist
+
+      - name: Publish CI status
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "program: ${PROGRAM_ID:-none}"
+            echo "house: ${AUTHORITY:-none}"
+            if [ -n "${AUTHORITY:-}" ]; then echo "house balance: $(solana balance "$AUTHORITY" -u devnet 2>&1)"; fi
+            if [ -n "${PROGRAM_ID:-}" ]; then echo "program account: $(solana account "$PROGRAM_ID" -u devnet 2>&1 | head -3 | tr '\n' ' ')"; fi
+          } > ci-out/status.txt
+          scripts/publish-branch.sh ci-build ci-out
