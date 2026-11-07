@@ -21,7 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 355
     outputs:
       has_seed: ${{ steps.keys.outputs.has_seed }}
     steps:
@@ -116,7 +116,7 @@ jobs:
       - name: Deploy the program to devnet
         id: deploy
         if: steps.keys.outputs.has_seed == 'true'
-        timeout-minutes: 170
+        timeout-minutes: 310
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -127,40 +127,48 @@ jobs:
             echo "The program on devnet already matches this build." | tee ci-out/deploy.log
             exit 0
           fi
-          # A first deploy holds the program and a same-size buffer at once; an upgrade needs only the
-          # buffer. Plus 0.3 SOL so the house can fund the agents and post prices.
+          # The deploy pays rent for one copy of the program: the CLI funds the buffer with it and the
+          # loader moves those lamports into the program data account. On top: the program account,
+          # the CLI's worst-case fee estimate (~0.04 SOL) and a little for the house to start with.
+          # Checked on a local validator: rent + 0.05 SOL deploys; the real fees were 0.0014 SOL.
           size=$(stat -c %s target/deploy/turing_pit.so)
-          copies=2; solana program show "$PROGRAM_ID" > /dev/null 2>&1 && copies=1
-          need=$(( (size + 300) * 6960 * copies + 300000000 ))
-          started=$(date +%s); announced=0
+          need=$(( (size + 173) * 6960 + 100000000 ))
+          balance() { local b; b=$(solana balance --lamports 2>/dev/null | cut -d' ' -f1) || true; case "$b" in ''|*[!0-9]*) echo 0;; *) echo "$b";; esac; }
+          started=$(date +%s); published=0; asked=0
           while true; do
-            have=$(solana balance --lamports | cut -d' ' -f1)
+            have=$(balance)
             [ "$have" -ge "$need" ] && break
-            solana airdrop 2 > /dev/null 2>&1 || true
-            have=$(solana balance --lamports | cut -d' ' -f1)
-            [ "$have" -ge "$need" ] && break
-            if [ "$announced" = 0 ]; then
-              # Publish the house address right away, then keep waiting: the deploy goes ahead
-              # as soon as someone sends devnet SOL from https://faucet.solana.com
+            now=$(date +%s)
+            if [ $(( now - asked )) -ge 120 ]; then
+              # The public faucet rarely answers GitHub's runners, but it costs nothing to ask.
+              solana airdrop 2 > /dev/null 2>&1 || solana airdrop 1 > /dev/null 2>&1 || true
+              asked=$now
+              have=$(balance)
+              [ "$have" -ge "$need" ] && break
+            fi
+            if [ $(( now - published )) -ge 300 ]; then
+              # Keep the house address and balance current on the ci-build branch: the deploy goes
+              # ahead as soon as someone sends devnet SOL from https://faucet.solana.com
               {
                 echo "commit: $GITHUB_SHA"
-                echo "state: waiting for devnet SOL (since $(date -u +%H:%M) UTC)"
+                echo "state: waiting for devnet SOL (since $(date -u -d @"$started" +%H:%M) UTC, gives up at $(date -u -d @$(( started + 18000 )) +%H:%M) UTC)"
                 echo "house: $AUTHORITY"
                 echo "program: $PROGRAM_ID"
-                echo "house balance: $(( have / 1000000 )) / $(( need / 1000000 )) milli-SOL needed"
+                echo "house balance: $(( have / 1000000 )) / $(( need / 1000000 )) milli-SOL needed (checked $(date -u +%H:%M) UTC)"
               } > ci-out/status.txt
               scripts/publish-branch.sh ci-build ci-out || true
-              announced=1
+              published=$now
             fi
-            if [ $(( $(date +%s) - started )) -gt 9600 ]; then
-              echo "Gave up after 160 minutes waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
+            if [ $(( now - started )) -gt 18000 ]; then
+              echo "Gave up after 5 hours waiting for devnet SOL at $AUTHORITY" | tee ci-out/deploy.log
               exit 1
             fi
             sleep 30
           done
+          echo "house balance before deploy: $have lamports" | tee ci-out/deploy.log
           solana program deploy target/deploy/turing_pit.so \
             --program-id "$RUNNER_TEMP/program-keypair.json" \
-            --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee ci-out/deploy.log
+            --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log
 
       - name: Build the arena site
         if: steps.keys.outputs.has_seed == 'true' && !cancelled()

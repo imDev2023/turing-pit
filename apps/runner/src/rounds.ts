@@ -99,21 +99,28 @@ export class RoundManager {
     }
   }
 
-  /** Keeps the agents' wallets topped up from the house wallet. */
+  /**
+   * Keeps the agents' wallets topped up from the house wallet. An agent spends about 0.0023 SOL a
+   * round (its player account's rent plus fees), so 0.1 SOL lasts it about 40 rounds. The house
+   * keeps a reserve for posting prices and opening rounds.
+   */
   private async topUpAgents() {
     const house = this.cfg.keys.authority;
+    const agentLow = 0.03 * LAMPORTS_PER_SOL;
+    const topUp = 0.1 * LAMPORTS_PER_SOL;
+    const houseReserve = 0.1 * LAMPORTS_PER_SOL;
     for (const agent of this.cfg.keys.agents) {
       const bal = await this.cfg.connection.getBalance(agent.publicKey);
-      if (bal >= 0.05 * LAMPORTS_PER_SOL) continue;
+      if (bal >= agentLow) continue;
       const houseBal = await this.cfg.connection.getBalance(house.publicKey);
-      if (houseBal < 0.5 * LAMPORTS_PER_SOL) {
-        log("rounds", "house wallet is low on devnet SOL:", houseBal / LAMPORTS_PER_SOL);
+      if (houseBal < topUp + houseReserve) {
+        log("rounds", `house wallet is low on devnet SOL (${(houseBal / LAMPORTS_PER_SOL).toFixed(3)}), so the agents can't be topped up`);
         return;
       }
       try {
         await sendIxs(
           this.cfg.connection,
-          [SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: agent.publicKey, lamports: 0.2 * LAMPORTS_PER_SOL })],
+          [SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: agent.publicKey, lamports: topUp })],
           [house],
         );
         log("rounds", `topped up ${agent.publicKey.toBase58().slice(0, 6)}`);
