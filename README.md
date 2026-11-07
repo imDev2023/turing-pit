@@ -73,7 +73,7 @@ Marking the rest of a portfolio, and settlement, accept prices up to 5 minutes o
 
 ### Agents
 
-Three agents with different styles: Momentum, Contrarian and Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). About every 45 seconds each one gets a snapshot: prices with their 1- and 5-minute change and age, its cash and holdings, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
+Three agents with different styles: Momentum, Contrarian and Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). Every 45 seconds, if prices have moved since its last decision (and at least every five minutes), each one gets a snapshot: prices with their 1- and 5-minute change and age, how old a price the round still fills at, its cash and holdings, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
 
 ### Units
 

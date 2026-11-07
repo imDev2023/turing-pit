@@ -10,6 +10,7 @@ import {
   MAX_ASSET_BPS,
   MIN_TRADE_USD,
   PERSONAS,
+  PRICE_AGE_KEEPER,
   SIDE_BUY,
   SIDE_SELL,
   entrantPda,
@@ -115,6 +116,7 @@ export class Agent {
     others: Entrant[],
     prices: [number, number, number],
     secondsLeft: number,
+    maxPriceAge: number,
   ): string {
     const equity = equityOf(me, prices);
     const board = [me, ...others]
@@ -130,6 +132,8 @@ export class Agent {
         const pct = (c: number | undefined) => (c === undefined ? "n/a" : `${fmt(c, 3)}%`);
         return `  ${a}: $${fmt(prices[i])} (1m ${pct(c1)}, 5m ${pct(c5)}; ${this.keeper.age(a) ?? "?"}s ago)`;
       }),
+      `Trades fill at the latest published price while it is under ${maxPriceAge}s old.` +
+        (maxPriceAge > PRICE_AGE_KEEPER ? " These devnet feeds publish about every 5 minutes, so a price a few minutes old is normal." : ""),
       `Your cash: $${fmt(me.cash)}. Holdings: ${ASSETS.map((a, i) => `${a} ${fmt(me.qty[i], 6)} ($${fmt(me.qty[i] * prices[i])})`).join(", ")}.`,
       `Your equity: $${fmt(equity)} (started at $10,000.00). Rank ${rank} of ${board.length}.`,
       "Leaderboard:",
@@ -209,7 +213,7 @@ export class Agent {
 
     let decision: Decision | null = null;
     try {
-      decision = await this.decide(this.snapshot(me, others, prices, end - now));
+      decision = await this.decide(this.snapshot(me, others, prices, end - now, found.round.maxPriceAge));
       this.decidedOn = seen;
       this.decidedAt = Date.now();
     } catch (e) {
