@@ -1,6 +1,7 @@
 # Runs the house on a GitHub runner: keeps Pyth prices fresh on devnet, opens and settles a
-# round every 15 minutes, and runs the three Claude agents. Each run lasts just under six hours;
-# the schedule starts the next one, and a successful CI run restarts it with the new code.
+# round every 15 minutes, and runs the three Claude agents. Each shift lasts 5 h 45 min and the
+# schedule starts one every 5 hours (or 4, overnight), so shifts overlap and the newer one takes
+# over. A successful CI run restarts the house with the new code.
 name: runner
 
 on:
@@ -9,7 +10,7 @@ on:
     types: [completed]
     branches: [main]
   schedule:
-    - cron: "41 */6 * * *"
+    - cron: "41 */5 * * *"
   workflow_dispatch:
 
 permissions:
