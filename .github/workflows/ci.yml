@@ -171,7 +171,7 @@ jobs:
 
   pages:
     # Needs Settings > Pages > Source set to "GitHub Actions". A failure here (for example before
-    # Pages is enabled) doesn't fail the run, so the house runner still restarts.
+    # Pages is enabled) doesn't fail the run.
     needs: build
     if: needs.build.outputs.has_seed == 'true'
     continue-on-error: true
@@ -300,6 +300,23 @@ jobs:
           solana program deploy target/deploy/turing_pit.so \
             --program-id "$RUNNER_TEMP/program-keypair.json" \
             --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log
+
+      # A new shift replaces the running one, so the house restarts on this commit's code. This
+      # doesn't rely on runner.yml listening for CI to finish: once this run was itself started by
+      # the workflow token (a later attempt of the SOL wait), that event may not start anything.
+      - name: Start the house
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in 1 2 3; do
+            if gh workflow run runner.yml -R "$GITHUB_REPOSITORY" --ref main; then
+              echo "Started a house shift." | tee -a ci-out/deploy.log
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "Couldn't start a house shift." | tee -a ci-out/deploy.log
+          exit 1
 
       - name: Publish CI status
         if: always()

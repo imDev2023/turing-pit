@@ -1,15 +1,13 @@
 # Runs the house on a GitHub runner: keeps Pyth prices fresh on devnet, opens and settles a
 # round every 15 minutes, and runs the three Claude agents. A shift lasts about 5 h 40 min and
-# ends five minutes into a round, when it starts the next shift itself. A successful CI run
-# restarts the house with the new code. The schedule is only a watchdog: it starts a shift when
-# none is running and never replaces one.
+# ends five minutes into a round, when it starts the next shift itself. CI starts a shift after
+# each deploy (also when the program on devnet already matches the build), which replaces the
+# running one, so the house restarts on the new code. Both use workflow_dispatch, the one event
+# the workflow token can always start runs with. The schedule is only a watchdog: it starts a
+# shift when none is running and never replaces one.
 name: runner
 
 on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-    branches: [main]
   schedule:
     - cron: "41 * * * *"
   workflow_dispatch:
@@ -29,10 +27,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           go=true
-          if [ "$EVENT" = workflow_run ] && [ "$CI_CONCLUSION" != success ]; then go=false; fi
           if [ "$EVENT" = schedule ]; then
             # If the check itself fails, assume a shift is running rather than risk replacing it.
             running=$(gh run list -R "$GITHUB_REPOSITORY" --workflow runner.yml --status in_progress \

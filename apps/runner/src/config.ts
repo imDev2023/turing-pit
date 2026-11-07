@@ -21,7 +21,7 @@ export function loadConfig() {
     pythApiKey: process.env.PYTH_API_KEY ?? "",
     anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
     agentModel: env("AGENT_MODEL", "claude-haiku-5-5"),
-    /** How long this run lasts before exiting, so CI can restart it cleanly. */
+    /** How long this run lasts before exiting, so the next house shift can take over cleanly. */
     durationMs: Number(env("DURATION_MIN", "340")) * 60_000,
     keeperIntervalMs: Number(env("KEEPER_INTERVAL_MS", "10000")),
     agentIntervalMs: Number(env("AGENT_INTERVAL_MS", "45000")),

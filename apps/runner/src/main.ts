@@ -1,6 +1,6 @@
 // The house: keeps Pyth prices fresh, opens and closes rounds, and runs the AI agents.
-// Runs for DURATION_MIN minutes and exits, so a scheduled CI job can restart it.
-// Exit code 3 means the program isn't deployed yet, so there is nothing to restart for.
+// Runs for DURATION_MIN minutes and exits, so a house shift (scripts/house-shift.sh) can hand over
+// cleanly. Exit code 3 means the program isn't deployed yet, so there is nothing to run.
 
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { makeAgents } from "./agents.js";
