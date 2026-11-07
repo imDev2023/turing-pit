@@ -24,7 +24,8 @@ jobs:
     outputs:
       go: ${{ steps.check.outputs.go }}
     steps:
-      - id: check
+      - name: Decide whether to start a shift
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}

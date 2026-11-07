@@ -9,6 +9,7 @@ import {
   KIND_HUMAN,
   MAX_ASSET_BPS,
   PRICE_AGE_KEEPER,
+  PRICE_AGE_SPONSORED,
   PERSONAS,
   ROUND_SECONDS,
   SHARD_ID,
@@ -50,7 +51,9 @@ function badge(label: string, ai: boolean): string {
 export function App() {
   const arena = useArena();
   const phase: Phase = arena.now < arena.end ? "live" : "settling";
-  const left = phase === "live" ? arena.end - arena.now : arena.start + ROUND_SECONDS - arena.now;
+  // Without an open round, count down to the next one.
+  const open = !arena.ready || !!arena.round;
+  const left = open && phase === "live" ? arena.end - arena.now : arena.start + ROUND_SECONDS - arena.now;
 
   return (
     <MotionConfig reducedMotion="user">
@@ -68,15 +71,19 @@ export function App() {
         </header>
 
         <section className="hero">
-          <div className={`clock ${phase === "live" && left <= 60 ? "urgent" : ""}`}>
-            <p className="clock-label">{phase === "live" ? "Trading closes in" : "Settling. Next round in"}</p>
+          <div className={`clock ${open && phase === "live" && left <= 60 ? "urgent" : ""}`}>
+            <p className="clock-label">{!open ? "Next round in" : phase === "live" ? "Trading closes in" : "Settling. Next round in"}</p>
             <p className="clock-time" aria-live="off">
               {clock(left)}
             </p>
             <p className="clock-sub">
-              {phase === "live"
-                ? `Round opened ${utc(arena.start)} with ${arena.rows.length} ${arena.rows.length === 1 ? "trader" : "traders"}.`
-                : "Final equity is being marked at the closing price."}
+              {arena.deployed === false
+                ? "The arena opens once its program is on devnet."
+                : arena.ready && !arena.round
+                  ? "Waiting for the house to open this round."
+                  : phase === "live"
+                    ? `Round opened ${utc(arena.start)} with ${arena.rows.length} ${arena.rows.length === 1 ? "trader" : "traders"}.`
+                    : "Final equity is being marked at the closing price."}
             </p>
           </div>
           <div className="pitch">
@@ -220,8 +227,8 @@ const span = (s: number) => (s < 120 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 6
 
 function Prices({ arena }: { arena: ArenaState }) {
   // A trade fills only at a price younger than the round's limit.
-  const limit = arena.round?.maxPriceAge ?? PRICE_AGE_KEEPER;
-  const sponsored = arena.round ? arena.round.shardId !== SHARD_ID : false;
+  const sponsored = arena.priceShard !== SHARD_ID;
+  const limit = arena.round?.maxPriceAge ?? (sponsored ? PRICE_AGE_SPONSORED : PRICE_AGE_KEEPER);
   return (
     <section className="prices" aria-label="Live prices">
       {ASSETS.map((a, i) => {
@@ -258,6 +265,8 @@ function Leaderboard({ arena }: { arena: ArenaState }) {
       </div>
       {!arena.ready ? (
         <p className="empty">Loading the round…</p>
+      ) : arena.deployed === false ? (
+        <p className="empty">The arena's Solana program isn't on devnet yet. Rounds start as soon as it is deployed.</p>
       ) : !arena.round ? (
         <p className="empty">This round hasn't opened yet. The house opens one every fifteen minutes.</p>
       ) : arena.rows.length === 0 ? (
@@ -486,6 +495,11 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
             {busy ? "Joining…" : "Join this round"}
           </button>
         </div>
+      )}
+      {connected && !me && phase === "live" && arena.ready && !arena.round && (
+        <p className="empty">
+          {arena.deployed === false ? "Seats open once the arena's program is on devnet." : "Waiting for the house to open this round."}
+        </p>
       )}
       {connected && !me && phase === "settling" && <p className="empty">This round has closed. Join the next one when the clock restarts.</p>}
 

@@ -1,6 +1,7 @@
-# Builds and tests everything, runs the end-to-end test on a local validator, deploys the
-# program to devnet and the arena site to GitHub Pages. Logs and public addresses go to the
-# ci-build branch so the build can be checked without access to the Actions tab.
+# Builds and tests everything, runs the end-to-end test on a local validator, publishes the arena
+# site to GitHub Pages and deploys the program to devnet (waiting, if need be, until the house
+# wallet has the SOL for it). Logs and public addresses go to the ci-build branch so the build can
+# be checked without access to the Actions tab.
 name: ci
 
 on:
@@ -9,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       attempt:
-        description: How many runs in a row have waited for the house's devnet SOL (the deploy step starts the next one, up to 10)
+        description: How many runs in a row have waited for the house's devnet SOL (the deploy job starts the next one, up to 10)
         required: false
         default: "1"
 
@@ -27,7 +28,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 90
     outputs:
       has_seed: ${{ steps.keys.outputs.has_seed }}
     steps:
@@ -68,7 +69,7 @@ jobs:
         run: |
           {
             echo "commit: $GITHUB_SHA"
-            echo "state: building and testing (deploy follows in a few minutes)"
+            echo "state: building and testing (the site and the program deploy after the tests pass)"
             echo "house: $AUTHORITY"
             echo "program: $PROGRAM_ID"
           } > ci-out/status.txt
@@ -117,12 +118,131 @@ jobs:
           scripts/set-program-id.sh "$PROGRAM_ID"
           cargo-build-sbf --manifest-path programs/turing_pit/Cargo.toml -- --locked 2>&1 \
             | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/build.log
-          ls -l target/deploy/turing_pit.so | tee -a ci-out/build.log
+          stat -c "%s bytes: %n" target/deploy/turing_pit.so | tee -a ci-out/build.log
+
+      - name: Keep the devnet build for the deploy job
+        if: steps.keys.outputs.has_seed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: program
+          path: target/deploy/turing_pit.so
+          if-no-files-found: error
+
+      - name: Build the arena site
+        if: steps.keys.outputs.has_seed == 'true'
+        env:
+          VITE_PROGRAM_ID: ${{ env.PROGRAM_ID }}
+          VITE_AUTHORITY: ${{ env.AUTHORITY }}
+          VITE_RPC_URL: ${{ vars.PUBLIC_RPC_URL }}
+          VITE_BASE: /${{ github.event.repository.name }}/
+        run: set -o pipefail && pnpm --filter @turing-pit/web build 2>&1 | tail -15 | tee ci-out/web.log
+
+      - name: Package the arena site
+        if: steps.keys.outputs.has_seed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+      - name: Publish the build status
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            if [ "$RESULT" = success ] && [ -n "${PROGRAM_ID:-}" ]; then
+              echo "state: built and tested; publishing the site and deploying the program"
+            else
+              echo "build finished: $(date -u +%Y-%m-%dT%H:%M:%SZ) ($RESULT)"
+            fi
+            echo "program: ${PROGRAM_ID:-none}"
+            echo "house: ${AUTHORITY:-none}"
+          } > ci-out/status.txt
+          scripts/publish-branch.sh ci-build ci-out
+
+      - name: Keep the logs for the deploy job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ci-out
+
+  pages:
+    # Needs Settings > Pages > Source set to "GitHub Actions". A failure here (for example before
+    # Pages is enabled) doesn't fail the run, so the house runner still restarts.
+    needs: build
+    if: needs.build.outputs.has_seed == 'true'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.has_seed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile > /dev/null
+
+      - name: Build logs so far
+        uses: actions/download-artifact@v4
+        with:
+          name: logs
+          path: ci-out
+
+      - name: The devnet build
+        uses: actions/download-artifact@v4
+        with:
+          name: program
+          path: target/deploy
+
+      - name: Cache Solana toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/solana-release
+            ~/.cache/solana
+          key: agave-${{ env.AGAVE_VERSION }}-v1
+
+      - name: Install Solana CLI
+        run: |
+          if [ ! -x "$HOME/solana-release/bin/solana" ]; then
+            curl -sSfL -o /tmp/solana.tar.bz2 \
+              "https://github.com/anza-xyz/agave/releases/download/${AGAVE_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+            tar xjf /tmp/solana.tar.bz2 -C "$HOME"
+          fi
+          echo "$HOME/solana-release/bin" >> "$GITHUB_PATH"
+
+      - name: House keys
+        env:
+          PIT_SEED: ${{ secrets.PIT_SEED }}
+        run: |
+          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" > "$RUNNER_TEMP/addresses.json"
+          echo "PROGRAM_ID=$(node -p "require('$RUNNER_TEMP/addresses.json').programId")" >> "$GITHUB_ENV"
+          echo "AUTHORITY=$(node -p "require('$RUNNER_TEMP/addresses.json').authority")" >> "$GITHUB_ENV"
 
       - name: Deploy the program to devnet
-        id: deploy
-        if: steps.keys.outputs.has_seed == 'true'
-        timeout-minutes: 310
+        timeout-minutes: 320
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ATTEMPT: ${{ inputs.attempt || '1' }}
@@ -181,26 +301,12 @@ jobs:
             --program-id "$RUNNER_TEMP/program-keypair.json" \
             --with-compute-unit-price 100000 --max-sign-attempts 60 --use-rpc 2>&1 | tee -a ci-out/deploy.log
 
-      - name: Build the arena site
-        if: steps.keys.outputs.has_seed == 'true' && !cancelled()
-        env:
-          VITE_PROGRAM_ID: ${{ env.PROGRAM_ID }}
-          VITE_AUTHORITY: ${{ env.AUTHORITY }}
-          VITE_RPC_URL: ${{ vars.PUBLIC_RPC_URL }}
-          VITE_BASE: /${{ github.event.repository.name }}/
-        run: set -o pipefail && pnpm --filter @turing-pit/web build 2>&1 | tail -15 | tee ci-out/web.log
-
-      - name: Package the arena site
-        if: steps.keys.outputs.has_seed == 'true' && !cancelled()
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: apps/web/dist
-
       - name: Publish CI status
         if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p ci-out
           {
             echo "commit: $GITHUB_SHA"
             echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -211,20 +317,3 @@ jobs:
             if [ -n "${PROGRAM_ID:-}" ]; then echo "program account: $(solana account "$PROGRAM_ID" -u devnet 2>&1 | head -3 | tr '\n' ' ')"; fi
           } > ci-out/status.txt
           scripts/publish-branch.sh ci-build ci-out
-
-  pages:
-    # Needs Settings > Pages > Source set to "GitHub Actions". A failure here (for example before
-    # Pages is enabled) doesn't fail the run, so the house runner still restarts.
-    needs: build
-    if: needs.build.outputs.has_seed == 'true' && !cancelled()
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4

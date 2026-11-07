@@ -82,6 +82,10 @@ export interface ArenaState {
   history: PastRound[];
   error: string | null;
   ready: boolean;
+  /** The shard of the price feeds shown: the round's own, or before a round the fresher one. */
+  priceShard: number;
+  /** Whether the program is on this cluster; null until the first check. */
+  deployed: boolean | null;
   refresh: () => void;
 }
 
@@ -122,11 +126,13 @@ export function useArena(): ArenaState {
   const [round, setRound] = useState<Round | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [prices, setPrices] = useState<(PythPrice | null)[]>([null, null, null]);
+  const [priceShard, setPriceShard] = useState(SHARD_ID);
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [tally, setTally] = useState<Tally>({ ai: 0, human: 0, rounds: 0 });
   const [history, setHistory] = useState<PastRound[]>([]);
   const [error, setError] = useState<string | null>(PROGRAM_ID && AUTHORITY ? null : "This build has no program id yet.");
   const [ready, setReady] = useState(false);
+  const [deployed, setDeployed] = useState<boolean | null>(null);
   const [tick, setTick] = useState(0);
   const seen = useRef(new Map<string, Thought | null>());
   const rowsRef = useRef<Row[]>([]);
@@ -143,6 +149,29 @@ export function useArena(): ArenaState {
     return () => clearInterval(t);
   }, []);
 
+  // Is the program on this cluster yet? Checked every 30 seconds until it is.
+  useEffect(() => {
+    if (!PROGRAM_ID) return;
+    let cancelled = false;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      try {
+        const info = await connection.getAccountInfo(PROGRAM_ID!);
+        if (cancelled) return;
+        setDeployed(!!info?.executable);
+        if (info?.executable) return;
+      } catch {
+        // retried below
+      }
+      if (!cancelled) t = setTimeout(check, 30_000);
+    };
+    check();
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [connection]);
+
   // Round, entrants and prices, every 4 seconds.
   useEffect(() => {
     if (!PROGRAM_ID || !roundAddress) return;
@@ -157,7 +186,9 @@ export function useArena(): ArenaState {
         const sets = shards.map((_, k) => feedInfos.slice(k * 3, k * 3 + 3).map((f) => (f ? decodePriceUpdate(f.data) : null)));
         // Show the round's own feeds; before a round exists, whichever source is fresher.
         const newest = (set: (PythPrice | null)[]) => Math.max(...set.map((x) => x?.publishTime ?? 0));
-        let p = r ? sets[shards.indexOf(r.shardId)] : [...sets].sort((a, b) => newest(b) - newest(a))[0];
+        const keeperFresher = newest(sets[0]) > 0 && newest(sets[0]) >= newest(sets[1]);
+        const shard = r ? r.shardId : keeperFresher ? SHARD_ID : SPONSORED_SHARD_ID;
+        let p = sets[shards.indexOf(shard)];
         if (!p && r) {
           const own = await connection.getMultipleAccountsInfo(r.feeds);
           p = own.map((f) => (f ? decodePriceUpdate(f.data) : null));
@@ -180,6 +211,7 @@ export function useArena(): ArenaState {
         if (cancelled) return;
         setRound(r);
         setPrices(p);
+        setPriceShard(shard);
         setRows(next);
         rowsRef.current = next;
         setError(null);
@@ -298,6 +330,8 @@ export function useArena(): ArenaState {
     history,
     error,
     ready,
+    priceShard,
+    deployed,
     refresh: () => setTick((t) => t + 1),
   };
 }
