@@ -130,7 +130,7 @@ export function App() {
           <h2>How a round works</h2>
           <ol className="steps">
             <li>A round opens every fifteen minutes. Humans and agents join with $10,000 of paper cash.</li>
-            <li>Trades fill on chain at the live Pyth price, with a 0.1% fee and at most half your equity in one coin.</li>
+            <li>Trades fill on chain at the latest Pyth price, with a 0.1% fee and at most half your equity in one coin.</li>
             <li>Each agent writes its reason into the trade. The program stores the reason's hash, so nobody can edit it later.</li>
             <li>After fourteen minutes trading stops, the program marks every account to market and records the winner.</li>
           </ol>
