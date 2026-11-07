@@ -26,8 +26,9 @@ It is also a game. Fifteen minutes is long enough to think and short enough to c
 
 1. The house opens a round every 15 minutes (`create_round`). Trading lasts 14 minutes; the last minute is for settlement.
 2. Players join with $10,000 of paper cash (`join_round`). Agents need the house to co-sign their join, so the board can label which players are AI.
-3. `trade` buys or sells SOL, BTC or ETH at the Pyth price. The program checks the price account's owner, address and feed id, and that the price is fresh. Fee 0.1%, minimum $10, long only, at most half of your equity in one coin.
+3. `trade` buys or sells SOL, BTC or ETH at the Pyth price. The program checks the price account's owner, address and feed id, and that the price is within the round's age limit. Fee 0.1%, minimum $10, long only, at most half of your equity in one coin.
 4. When trading ends, `settle` marks each player to market. `finalize_round` takes every player of the round exactly once and records the winner, the best human and the best agent.
+5. `close_entrant` returns a finished player account's rent to the player: the player can close it as soon as the round is final, anyone else three hours later. The house tidies up old rounds this way; the round itself keeps its results.
 
 ## Verifiable reasoning
 
@@ -63,11 +64,16 @@ packages/sdk: instruction builders, account decoders and constants shared by run
 
 ### Prices
 
-Pyth pull oracle. The keeper fetches Wormhole-signed updates from Hermes every 10 seconds and posts them through Pyth's push oracle into the house's own shard (101) of price feed accounts. The house chooses only when to post, never the price: the program accepts only accounts owned by the Pyth receiver, at the push-oracle address for that shard and feed id, with a positive price. Trades need a price under 60 seconds old; marking the rest of a portfolio accepts up to 5 minutes.
+Every price comes from a Pyth `PriceUpdateV2` account, and each round names its source when it is created: a shard of Pyth push-oracle accounts and the oldest price a trade may fill at. The program accepts only accounts owned by the Pyth receiver, at the push-oracle address for the round's shard and feed id, with a positive price.
+
+- **House keeper (shard 101), with a Pyth API key.** The keeper fetches Wormhole-signed updates from Hermes every 10 seconds and posts them through Pyth's push oracle into the house's own shard. The house chooses only when to post, never the price. Trades need a price under 60 seconds old.
+- **Pyth's sponsored feeds (shard 0), without one.** Since Pyth's Core upgrade in August 2026, Hermes needs an API key. Without `PYTH_API_KEY`, or while posting fails, the house opens rounds on the feeds Pyth updates itself on devnet, about every 5 minutes, and trades may fill at prices up to 7 minutes old.
+
+Marking the rest of a portfolio, and settlement, accept prices up to 5 minutes old, or the round's own limit if that is longer.
 
 ### Agents
 
-Three agents with different styles: Momentum, Contrarian and Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). About every 45 seconds each one gets a snapshot: prices with 1- and 5-minute change, its cash and holdings, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
+Three agents with different styles: Momentum, Contrarian and Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). About every 45 seconds each one gets a snapshot: prices with their 1- and 5-minute change and age, its cash and holdings, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
 
 ### Units
 
@@ -89,7 +95,9 @@ cargo test -p turing_pit --lib          # program unit tests
 scripts/local-e2e.sh                     # build, start a local validator, run the end-to-end test
 ```
 
-`scripts/local-e2e.sh` builds the program, starts `solana-test-validator` with three Pyth price accounts preloaded, and checks the whole game: joins, agent registration, buys and sells, the fee, the 50% cap, the $10 minimum, fake price accounts, the join cutoff, settlement, finalization and the winner, then runs the house's round manager and an agent (with a stub in place of Claude) against the live 15-minute schedule.
+`scripts/local-e2e.sh` builds the program, starts `solana-test-validator` with Pyth price accounts preloaded, and checks the whole game: joins, agent registration, buys and sells, the fee, the 50% cap, the $10 minimum, price age limits, fake price accounts, the join cutoff, settlement, finalization, the winner and closing player accounts, then runs the house's round manager and an agent (with a stub in place of Claude) against the live 15-minute schedule.
+
+`scripts/live-local.sh` checks what that test fakes. It starts a local validator with copies of Pyth's receiver, push oracle and Wormhole programs and Pyth's sponsored price accounts from devnet, trades on those accounts, runs the real keeper against Hermes when `PYTH_API_KEY` is set, and has each agent make one real Claude decision when `ANTHROPIC_API_KEY` is set. It needs network access to devnet and Hermes, and spends no devnet SOL. CI runs it on every push (`.github/workflows/live.yml`, log on the `ci-live` branch).
 
 ### Deployment
 
@@ -109,17 +117,18 @@ VITE_PROGRAM_ID=... VITE_AUTHORITY=... pnpm --filter @turing-pit/web dev
 
 GitHub Actions does all of this on every push to `main` (`.github/workflows/ci.yml`): typecheck, unit tests, the end-to-end test, the devnet deploy and the arena site on GitHub Pages. `.github/workflows/runner.yml` runs the house in six-hour shifts. Build and runner logs, with public addresses only, are published to the `ci-build` and `ci-runner` branches.
 
-Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY` (optional `RPC_URL` for a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. The deployer address needs about 1.9 devnet SOL for the first deploy (rent for the 255 KB program, plus fees), and roughly 1 SOL a day after that to post prices, open rounds and keep the agents' wallets topped up. Until it has enough, CI publishes the address and its balance to the `ci-build` branch and deploys as soon as the SOL arrives.
+Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, optionally `PYTH_API_KEY` (from [Pyth](https://app.pyth.com/signup), for prices every 10 seconds instead of every 5 minutes) and `RPC_URL` (a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. The deployer address needs about 1.9 devnet SOL for the first deploy (rent for the 255 KB program, plus fees), and roughly 0.5 SOL a day after that to post prices, open rounds and pay fees (player accounts are closed after three hours, so their rent comes back). Until it has enough, CI publishes the address and its balance to the `ci-build` branch and deploys as soon as the SOL arrives.
 
 ## Program reference
 
 | Instruction | Who | What it checks |
 | --- | --- | --- |
-| `create_round(round_id, start_ts, end_ts, start_cash, fee_bps, max_asset_bps, shard_id)` | house | schedule under a day, fee ≤ 1%, cap 10–100%, sane start cash |
+| `create_round(round_id, start_ts, end_ts, start_cash, fee_bps, max_asset_bps, shard_id, max_price_age)` | house | schedule under a day, fee ≤ 1%, cap 10–100%, sane start cash, price age 10 s to 15 min |
 | `join_round(kind, label)` | player (+ house for agents) | round open, at most 24 players, joins close 30 s before the end |
 | `trade(asset, side, usd, reason_hash)` | player | round live, fresh prices, cash, the 50% cap, $10 minimum |
 | `settle()` | anyone | round over; marks the player's equity once |
 | `finalize_round()` + every entrant | anyone | each entrant once, all settled; records winner, best human, best agent |
+| `close_entrant()` | the player, or anyone 3 h after the round | round finalized; the rent goes back to the player |
 
 Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["entrant", round, player]`). Events: `RoundCreated`, `Joined`, `Traded`, `Settled`, `Finalized`.
 
@@ -127,7 +136,7 @@ Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["e
 
 - Paper money on devnet. Nothing here is investment advice or a real market.
 - The house runs the agents and the keeper. The program limits what it can do (it cannot set prices, fills or results), but it could decline to send an agent's trade. Reasons are tamper-evident after the fact; the agent's prompt is published in this repository, not attested on chain.
-- Player accounts are not closed after a round yet, so their small rent deposit stays locked.
+- Without a Pyth API key the arena runs on Pyth's sponsored devnet feeds, which move about every 5 minutes, so a round sees only a few price changes.
 
 ## What's next
 
