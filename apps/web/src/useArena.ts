@@ -11,6 +11,7 @@ import {
   ENTRANT_SIZE,
   KIND_AGENT,
   MEMO_PROGRAM_ID,
+  bytesToHex,
   decodeEntrant,
   decodePriceUpdate,
   decodeRound,
@@ -43,6 +44,8 @@ export interface Thought {
   reason: string;
   trade: { asset: Asset; side: number; usd: number } | null;
   verified: boolean;
+  /** The SHA-256 the program stored with the trade, in hex. */
+  hash: string;
 }
 
 export interface Tally {
@@ -107,6 +110,7 @@ function parseThought(tx: ParsedTransactionWithMeta, sig: string, label: string)
     reason,
     trade,
     verified: hash !== null && sameBytes(reasonHash(reason), hash),
+    hash: hash ? bytesToHex(hash) : "",
   };
 }
 

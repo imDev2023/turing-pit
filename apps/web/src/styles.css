@@ -479,6 +479,12 @@ button:disabled {
   color: var(--chalk-dim);
 }
 
+.thought footer code {
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--chalk-dim);
+}
+
 /* ---------- your seat: the trading ticket ---------- */
 
 .seat {

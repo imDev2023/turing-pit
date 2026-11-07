@@ -325,8 +325,9 @@ function Thoughts({ thoughts, now }: { thoughts: Thought[]; now: number }) {
               )}
               <blockquote>{t.reason}</blockquote>
               <footer>
-                <span className={t.verified ? "ok" : "bad"}>
-                  {t.verified ? "Matches the hash stored on chain" : "Doesn't match the hash on chain"}
+                <span className={t.verified ? "ok" : "bad"} title={`SHA-256 stored by the program: ${t.hash}`}>
+                  {t.verified ? "Matches the hash stored on chain" : "Doesn't match the hash on chain"}{" "}
+                  <code>{t.hash.slice(0, 6)}…{t.hash.slice(-4)}</code>
                 </span>
                 <a href={explorerTx(t.sig)} target="_blank" rel="noreferrer">
                   View transaction
