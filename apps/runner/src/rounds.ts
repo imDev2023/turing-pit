@@ -1,13 +1,17 @@
 // Opens a round every 15 minutes, then settles every entrant and names the winner once it ends.
+// Later it closes the players' accounts and then the round's own, so their rent comes back.
 
 import { LAMPORTS_PER_SOL, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   CLOSE_DELAY_SECONDS,
   ENTRANT_SIZE,
   PRICE_AGE_KEEPER,
+  ROUND_CLOSE_DELAY_SECONDS,
   ROUND_SECONDS,
+  ROUND_SIZE,
   SHARD_ID,
   closeEntrantIx,
+  closeRoundIx,
   createRoundIx,
   decodeEntrant,
   decodeRound,
@@ -40,7 +44,8 @@ export async function fetchEntrants(cfg: Config, round: PublicKey): Promise<{ ad
 }
 
 export class RoundManager {
-  private closed = new Set<number>();
+  /** Rounds that are settled and finalized (or gone), so the loop leaves them alone. */
+  private finished = new Set<number>();
   /** Last time a settle or finalize failure was logged per round, so a stall doesn't flood the log. */
   private complained = new Map<number, number>();
 
@@ -83,10 +88,11 @@ export class RoundManager {
     }
   }
 
-  private async closeRound(roundId: number) {
+  /** Settles every entrant of an ended round, then names its winner. */
+  private async finishRound(roundId: number) {
     const found = await fetchRound(this.cfg, roundId);
-    if (!found) return void this.closed.add(roundId);
-    if (found.round.finalized) return void this.closed.add(roundId);
+    if (!found) return void this.finished.add(roundId);
+    if (found.round.finalized) return void this.finished.add(roundId);
 
     const entrants = await fetchEntrants(this.cfg, found.address);
     const unsettled = entrants.filter((e) => !e.entrant.settled);
@@ -114,7 +120,7 @@ export class RoundManager {
         [this.cfg.keys.authority],
         { computeUnits: 400_000 },
       );
-      this.closed.add(roundId);
+      this.finished.add(roundId);
       const best = [...entrants].sort((a, b) => b.entrant.finalEquity - a.entrant.finalEquity)[0];
       log("rounds", `round ${roundId} finalized, winner ${best?.entrant.label ?? "none"}`, sig);
     } catch (e) {
@@ -154,8 +160,9 @@ export class RoundManager {
   }
 
   /**
-   * Closes the player accounts of rounds that ended more than three hours ago. The rent goes back
-   * to each player, mostly the house's own agents, which keeps the arena cheap to run.
+   * Closes the player accounts of rounds that ended more than three hours ago (the rent goes back
+   * to each player, mostly the house's own agents), then each round's own account six hours after
+   * it ends (the rent goes back to the house). That keeps the arena's running cost down to fees.
    */
   private async tidyUp() {
     const now = Math.floor(Date.now() / 1000);
@@ -187,6 +194,36 @@ export class RoundManager {
         }
       }
     }
+
+    const authority = this.cfg.keys.authority;
+    const rounds = await this.cfg.connection.getProgramAccounts(this.cfg.programId, {
+      filters: [{ dataSize: ROUND_SIZE }, { memcmp: { offset: 8, bytes: authority.publicKey.toBase58() } }],
+    });
+    const closable: { address: PublicKey; round: Round }[] = [];
+    for (const a of rounds) {
+      const r = decodeRound(a.account.data);
+      if (!r) continue;
+      if (!r.finalized) {
+        // A round left unfinished while the house was down: finish it, so it can be closed later.
+        if (now >= r.endTs + 2 * 60 * 60 && now < r.endTs + 24 * 60 * 60) await this.finishRound(r.roundId);
+        continue;
+      }
+      if (r.closed === r.entrants && now >= r.endTs + ROUND_CLOSE_DELAY_SECONDS + 30) closable.push({ address: a.pubkey, round: r });
+    }
+    for (let i = 0; i < closable.length; i += 8) {
+      const batch = closable.slice(i, i + 8);
+      const ids = batch.map((c) => c.round.roundId).join(", ");
+      try {
+        await sendIxs(
+          this.cfg.connection,
+          batch.map((c) => closeRoundIx({ programId: this.cfg.programId, round: c.address, authority: authority.publicKey })),
+          [authority],
+        );
+        log("rounds", `closed round account(s) ${ids}; their rent went back to the house`);
+      } catch (e) {
+        log("rounds", `closing round account(s) ${ids} failed:`, shortError(e));
+      }
+    }
   }
 
   async run(until: number) {
@@ -201,8 +238,8 @@ export class RoundManager {
         if (now >= (current + 1) * ROUND_SECONDS - 180) await this.ensureRound(current + 1);
         // Settling needs fresh prices; if Pyth's feeds stall, keep retrying rounds for two hours.
         for (let id = current - 8; id <= current; id++) {
-          if (this.closed.has(id)) continue;
-          if (now >= roundTimes(id).end + 3) await this.closeRound(id);
+          if (this.finished.has(id)) continue;
+          if (now >= roundTimes(id).end + 3) await this.finishRound(id);
         }
         if (Date.now() - lastTopUp > 120_000) {
           lastTopUp = Date.now();

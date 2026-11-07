@@ -63,6 +63,9 @@ pub const JOIN_CUTOFF_SECS: i64 = 30;
 /// Anyone may close a player's account (refunding its rent to the player) this long after the
 /// round ends, so recent results stay readable; the player may close it as soon as it's final.
 pub const CLOSE_DELAY_SECS: i64 = 3 * 60 * 60;
+/// The house may close a round's account (its rent goes back to the house) this long after the
+/// round ends, once every player's account is closed. The arena shows the last six hours.
+pub const ROUND_CLOSE_DELAY_SECS: i64 = 6 * 60 * 60;
 
 #[program]
 pub mod turing_pit {
@@ -119,6 +122,7 @@ pub mod turing_pit {
         round.best_agent_equity = 0;
         round.bump = ctx.bumps.round;
         round.max_price_age = max_price_age;
+        round.closed = 0;
 
         emit!(RoundCreated {
             round: round.key(),
@@ -369,7 +373,7 @@ pub mod turing_pit {
     /// player. The player can do it straight away, anyone else after `CLOSE_DELAY_SECS`. The
     /// round keeps its results and counts.
     pub fn close_entrant(ctx: Context<CloseEntrant>) -> Result<()> {
-        let round = &ctx.accounts.round;
+        let round = &mut ctx.accounts.round;
         require!(round.finalized, PitError::NotFinalized);
         if ctx.accounts.closer.key() != ctx.accounts.player.key() {
             let now = Clock::get()?.unix_timestamp;
@@ -378,6 +382,22 @@ pub mod turing_pit {
                 PitError::TooEarlyToClose
             );
         }
+        round.closed = round.closed.checked_add(1).ok_or(PitError::MathOverflow)?;
+        Ok(())
+    }
+
+    /// Closes a round's account once every player's account is closed and
+    /// `ROUND_CLOSE_DELAY_SECS` have passed; the rent goes back to the house. The results stay
+    /// in the round's transactions and events.
+    pub fn close_round(ctx: Context<CloseRound>) -> Result<()> {
+        let round = &ctx.accounts.round;
+        require!(round.finalized, PitError::NotFinalized);
+        require!(round.closed == round.entrants, PitError::PlayersStillOpen);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= round.end_ts.saturating_add(ROUND_CLOSE_DELAY_SECS),
+            PitError::RoundTooRecent
+        );
         Ok(())
     }
 }
@@ -528,6 +548,7 @@ pub struct FinalizeRound<'info> {
 
 #[derive(Accounts)]
 pub struct CloseEntrant<'info> {
+    #[account(mut)]
     pub round: Account<'info, Round>,
     #[account(mut, has_one = round, has_one = player, close = player)]
     pub entrant: Account<'info, Entrant>,
@@ -535,6 +556,14 @@ pub struct CloseEntrant<'info> {
     #[account(mut)]
     pub player: UncheckedAccount<'info>,
     pub closer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseRound<'info> {
+    #[account(mut, has_one = authority, close = authority)]
+    pub round: Account<'info, Round>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
 }
 
 #[account]
@@ -563,6 +592,8 @@ pub struct Round {
     pub bump: u8,
     /// Seconds: the oldest price a trade may fill at (see `MIN_PRICE_AGE`..`MAX_PRICE_AGE`).
     pub max_price_age: u16,
+    /// Player accounts closed so far; the house can close the round once this equals `entrants`.
+    pub closed: u32,
 }
 
 #[account]
@@ -685,6 +716,10 @@ pub enum PitError {
     NotFinalized,
     #[msg("Only the player can close this account until three hours after the round")]
     TooEarlyToClose,
+    #[msg("Every player's account must be closed first")]
+    PlayersStillOpen,
+    #[msg("A round can be closed six hours after it ends")]
+    RoundTooRecent,
 }
 
 #[cfg(test)]
@@ -694,7 +729,7 @@ mod layout_tests {
     /// The TypeScript client decodes accounts at fixed offsets; these sizes pin the layout.
     #[test]
     fn account_sizes_match_client() {
-        assert_eq!(8 + Round::INIT_SPACE, 247);
+        assert_eq!(8 + Round::INIT_SPACE, 251);
         assert_eq!(8 + Entrant::INIT_SPACE, 191);
     }
 }

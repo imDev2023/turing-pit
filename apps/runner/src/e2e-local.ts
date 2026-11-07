@@ -22,6 +22,7 @@ import {
   SIDE_SELL,
   bytesToHex,
   closeEntrantIx,
+  closeRoundIx,
   createRoundIx,
   decodeEntrant,
   decodePriceUpdate,
@@ -36,6 +37,7 @@ import {
   joinRoundIx,
   memoIx,
   reasonHash,
+  ROUND_CLOSE_DELAY_SECONDS,
   roundIdAt,
   roundPda,
   settleIx,
@@ -330,6 +332,26 @@ async function main() {
   );
   const r2 = decodeRound((await connection.getAccountInfo(round))!.data)!;
   check("the round keeps its results", r2.finalized && r2.winner.equals(agent.publicKey) && r2.entrants === 2);
+  check("the round counts closed player accounts", r2.closed === 1, r2.closed);
+
+  console.log("close_round");
+  const closeRound = (r: PublicKey, by: Keypair) => send([closeRoundIx({ programId, round: r, authority: by.publicKey })], [by]);
+  await expectFail("a round can't be closed while a player's account is open", closeRound(round, house), msgOf(6024));
+  await send([closeEntrantIx({ programId, round, player: agent.publicKey, closer: agent.publicKey })], [agent]);
+  check("once every player's account is closed", decodeRound((await connection.getAccountInfo(round))!.data)!.closed === 2);
+  await expectFail("it still waits six hours after the end", closeRound(round, house), msgOf(6025));
+  // A round that ended more than six hours ago, nobody in it.
+  const oldId = 8_000_000 + (now % 100_000);
+  const oldEnd = (await chainTime()) - ROUND_CLOSE_DELAY_SECONDS - 60;
+  const old = roundPda(programId, house.publicKey, oldId);
+  await send([createRoundIx({ programId, authority: house.publicKey, roundId: oldId, startTs: oldEnd - 900, endTs: oldEnd })], [house]);
+  await expectFail("an unfinished round can't be closed", closeRound(old, house), msgOf(6022));
+  await send([finalizeRoundIx({ programId, round: old, entrants: [] })], [house]);
+  await expectFail("only the house that opened a round can close it", closeRound(old, human), /0x7d1|ConstraintHasOne|has one/i);
+  const houseBefore = await connection.getBalance(house.publicKey);
+  await closeRound(old, house);
+  const back = (await connection.getBalance(house.publicKey)) - houseBefore;
+  check(`the house closes a finished round six hours on and gets its rent back (+${back} lamports)`, !(await connection.getAccountInfo(old)) && back > 2_000_000);
 
   // ---- the house runner: opens the current 15-minute round; an agent joins and trades with a stub brain.
   console.log("runner");

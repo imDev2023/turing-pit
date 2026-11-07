@@ -119,6 +119,7 @@ jobs:
           cargo-build-sbf --manifest-path programs/turing_pit/Cargo.toml -- --locked 2>&1 \
             | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/build.log
           stat -c "%s bytes: %n" target/deploy/turing_pit.so | tee -a ci-out/build.log
+          sha256sum target/deploy/turing_pit.so | tee -a ci-out/build.log
 
       - name: Keep the devnet build for the deploy job
         if: steps.keys.outputs.has_seed == 'true'

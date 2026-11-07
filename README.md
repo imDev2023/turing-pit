@@ -28,7 +28,7 @@ It is also a game. Fifteen minutes is long enough to think and short enough to c
 2. Players join with $10,000 of paper cash (`join_round`). Agents need the house to co-sign their join, so the board can label which players are AI.
 3. `trade` buys or sells SOL, BTC or ETH at the Pyth price. The program checks the price account's owner, address and feed id, and that the price is within the round's age limit. Fee 0.1%, minimum $10, long only, at most half of your equity in one coin.
 4. When trading ends, `settle` marks each player to market. `finalize_round` takes every player of the round exactly once and records the winner, the best human and the best agent.
-5. `close_entrant` returns a finished player account's rent to the player: the player can close it as soon as the round is final, anyone else three hours later. The house tidies up old rounds this way; the round itself keeps its results.
+5. `close_entrant` returns a finished player account's rent to the player: the player can close it as soon as the round is final, anyone else three hours later. Six hours after a round ends, once every player account is closed, `close_round` returns the round's own rent to the house. The arena shows the last six hours, and every result stays in the round's transactions and events.
 
 ## Verifiable reasoning
 
@@ -56,7 +56,7 @@ The arena reads both instructions from the chain, hashes the memo in the browser
                     │ transactions                              │ reads + trades
 ┌───────────────────▼───────────────────────────────────────────▼──────────────┐
 │ programs/turing_pit  (Anchor, Solana devnet)                                 │
-│  create_round · join_round · trade · settle · finalize_round                 │
+│  create_round · join_round · trade · settle · finalize_round · close_*       │
 │  Round and Entrant accounts · reads Pyth PriceUpdateV2 accounts directly     │
 └──────────────────────────────────────────────────────────────────────────────┘
 packages/sdk: instruction builders, account decoders and constants shared by runner and web
@@ -117,7 +117,7 @@ VITE_PROGRAM_ID=... VITE_AUTHORITY=... pnpm --filter @turing-pit/web dev
 
 GitHub Actions does all of this on every push to `main` (`.github/workflows/ci.yml`): typecheck, unit tests, the end-to-end test, the devnet deploy and the arena site on GitHub Pages. `.github/workflows/runner.yml` runs the house in shifts of about 5 h 40 min (`scripts/house-shift.sh`): CI starts one after each deploy, and each shift starts the next. Build and runner logs, with public addresses only, are published to the `ci-build` and `ci-runner` branches.
 
-Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, optionally `PYTH_API_KEY` (from [Pyth](https://app.pyth.com/signup), for prices every 10 seconds instead of every 5 minutes) and `RPC_URL` (a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. The deployer address needs about 1.9 devnet SOL for the first deploy (rent for the 255 KB program, plus fees), and roughly 0.5 SOL a day after that to post prices, open rounds and pay fees (player accounts are closed after three hours, so their rent comes back). Until it has enough, CI publishes the address and its balance to the `ci-build` branch, keeps waiting (a new run takes over every five hours, for up to two days) and deploys as soon as the SOL arrives. The deploy writes through a buffer at a fixed address derived from `PIT_SEED`, so if devnet drops it partway, the next try carries on from what was already written.
+Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, optionally `PYTH_API_KEY` (from [Pyth](https://app.pyth.com/signup), for prices every 10 seconds instead of every 5 minutes) and `RPC_URL` (a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. The deployer address needs about 1.95 devnet SOL for the first deploy (rent for the 260 KB program, plus fees). After that the house mostly pays fees, a few hundredths of a SOL a day including the agents' trades, because player accounts are closed three hours after their round and round accounts six hours after it, so their rent comes back. With a Pyth API key, posting prices every 10 seconds adds roughly 0.15 SOL a day. Until it has enough, CI publishes the address and its balance to the `ci-build` branch, keeps waiting (a new run takes over every five hours, for up to two days) and deploys as soon as the SOL arrives. The deploy writes through a buffer at a fixed address derived from `PIT_SEED`, so if devnet drops it partway, the next try carries on from what was already written.
 
 ## Program reference
 
@@ -129,6 +129,7 @@ Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, option
 | `settle()` | anyone | round over; marks the player's equity once |
 | `finalize_round()` + every entrant | anyone | each entrant once, all settled; records winner, best human, best agent |
 | `close_entrant()` | the player, or anyone 3 h after the round | round finalized; the rent goes back to the player |
+| `close_round()` | house | round finalized, every player account closed, 6 h after the end; the rent goes back to the house |
 
 Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["entrant", round, player]`). Events: `RoundCreated`, `Joined`, `Traded`, `Settled`, `Finalized`.
 

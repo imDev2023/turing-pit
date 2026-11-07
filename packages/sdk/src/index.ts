@@ -42,6 +42,8 @@ export const MAX_ASSET_BPS = 5_000; // at most half of equity in one asset
 export const MIN_TRADE_USD = 10;
 /** Anyone may close a player's account this long after its round ends; the rent goes to the player. */
 export const CLOSE_DELAY_SECONDS = 3 * 60 * 60;
+/** The house can close a round's account this long after it ends, once its players' accounts are closed. */
+export const ROUND_CLOSE_DELAY_SECONDS = 6 * 60 * 60;
 
 export const KIND_HUMAN = 0;
 export const KIND_AGENT = 1;
@@ -65,6 +67,7 @@ const IX = {
   settle: disc("global:settle"),
   finalizeRound: disc("global:finalize_round"),
   closeEntrant: disc("global:close_entrant"),
+  closeRound: disc("global:close_round"),
 };
 const ACCOUNT = {
   round: disc("account:Round"),
@@ -72,7 +75,9 @@ const ACCOUNT = {
   priceUpdateV2: disc("account:PriceUpdateV2"),
 };
 
-export const ROUND_SIZE = 247;
+export const ROUND_SIZE = 251;
+/** Rounds written before `closed` was added; still decoded, with `closed` read as 0. */
+const ROUND_SIZE_V1 = 247;
 export const ENTRANT_SIZE = 191;
 
 // ---------- addresses ----------
@@ -307,12 +312,21 @@ export function closeEntrantIx(args: {
   return new TransactionInstruction({
     programId: args.programId,
     keys: [
-      meta(args.round, false, false),
+      meta(args.round, false, true),
       meta(entrantPda(args.programId, args.round, args.player), false, true),
       meta(args.player, false, true),
       meta(args.closer, true, false),
     ],
     data: concat(IX.closeEntrant),
+  });
+}
+
+/** Closes a finalized round whose player accounts are all closed; the rent goes back to the house. */
+export function closeRoundIx(args: { programId: PublicKey; round: PublicKey; authority: PublicKey }): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [meta(args.round, false, true), meta(args.authority, true, true)],
+    data: concat(IX.closeRound),
   });
 }
 
@@ -374,10 +388,12 @@ export interface Round {
   bestAgentEquity: number;
   /** Seconds: the oldest price a trade may fill at in this round. */
   maxPriceAge: number;
+  /** Player accounts closed so far; the house can close the round once this equals `entrants`. */
+  closed: number;
 }
 
 export function decodeRound(data: Uint8Array): Round | null {
-  if (data.length < ROUND_SIZE || !hasDisc(data, ACCOUNT.round)) return null;
+  if (data.length < ROUND_SIZE_V1 || !hasDisc(data, ACCOUNT.round)) return null;
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const u64 = (o: number) => dv.getBigUint64(o, true);
   const i64 = (o: number) => Number(dv.getBigInt64(o, true));
@@ -401,6 +417,7 @@ export function decodeRound(data: Uint8Array): Round | null {
     bestHumanEquity: Number(u64(228)) / MICRO,
     bestAgentEquity: Number(u64(236)) / MICRO,
     maxPriceAge: dv.getUint16(245, true),
+    closed: data.length >= ROUND_SIZE ? dv.getUint32(247, true) : 0,
   };
 }
 
@@ -496,6 +513,8 @@ export const PIT_ERRORS = [
   "Every entrant must be settled first",
   "The round is not finalized yet",
   "Only the player can close this account until three hours after the round",
+  "Every player's account must be closed first",
+  "A round can be closed six hours after it ends",
 ];
 
 /** Turns a transaction error into something a player can read. */
