@@ -21,14 +21,41 @@ mkdirSync(out, { recursive: true });
 
 const browser = await chromium.launch();
 
-/** Opens the arena and waits for the chain data: prices first, then a few polls for the board and the feed. */
+/** Counts the RPC requests that failed (by HTTP status and method), so a run shows when the public
+ *  RPC turned the runner away. Returns a function that summarizes them. */
+function watchRpc(page) {
+  const counts = new Map();
+  const add = (key) => counts.set(key, (counts.get(key) ?? 0) + 1);
+  const method = (req) => {
+    try {
+      const body = JSON.parse(req.postData() ?? "null");
+      return Array.isArray(body) ? `batch of ${body.length}` : (body?.method ?? "?");
+    } catch {
+      return "?";
+    }
+  };
+  page.on("response", (res) => {
+    if (/solana\.com/.test(res.url()) && res.status() >= 400) add(`${res.status()} ${method(res.request())}`);
+  });
+  page.on("requestfailed", (req) => {
+    if (/solana\.com/.test(req.url())) add(`${req.failure()?.errorText ?? "failed"} ${method(req)}`);
+  });
+  return () => [...counts].map(([k, n]) => `${k} x${n}`);
+}
+
+/** Opens the arena and waits for the chain data: prices, then the agents' reasons (when there are
+ *  any; they load after the board), then a few more polls. */
 async function openArena(context) {
   const page = await context.newPage();
+  page.rpcErrors = watchRpc(page);
   await page.goto(url, { waitUntil: "load", timeout: 60_000 });
   await page
     .waitForFunction(() => /\$\d/.test(document.querySelector(".prices")?.textContent ?? ""), null, { timeout: 60_000 })
     .catch(() => console.log("no prices after a minute; taking the shots anyway"));
-  await page.waitForTimeout(10_000);
+  await page
+    .waitForSelector(".thoughts .thought", { timeout: 45_000 })
+    .catch(() => console.log("no agent reasons on the page after 45 s"));
+  await page.waitForTimeout(5_000);
   return page;
 }
 
@@ -237,6 +264,7 @@ async function walkthrough() {
   await wait(5.5);
   await cdp.send("Page.stopScreencast");
   const ended = Date.now() / 1000;
+  console.log(`walkthrough RPC errors: ${p.rpcErrors().join(", ") || "none"}`);
   await context.close();
 
   // ffmpeg's concat demuxer takes each frame for as long as the page showed it.
@@ -273,7 +301,7 @@ for (const [name, sel] of [
   const el = page.locator(sel).first();
   if (await el.count()) await el.screenshot({ path: join(out, `${name}.png`) });
 }
-const facts = await describe(page);
+const facts = { ...(await describe(page)), rpcErrors: page.rpcErrors() };
 writeFileSync(join(out, "page.json"), JSON.stringify(facts, null, 2) + "\n");
 console.log(JSON.stringify(facts, null, 2));
 await desk.close();
@@ -283,6 +311,7 @@ const phone = await browser.newContext({ ...devices["iPhone 13"] });
 const phonePage = await openArena(phone);
 await phonePage.screenshot({ path: join(out, "phone.png") });
 await phonePage.screenshot({ path: join(out, "phone-full.png"), fullPage: true });
+console.log(`phone page RPC errors: ${phonePage.rpcErrors().join(", ") || "none"}`);
 await phone.close();
 
 if (video) await walkthrough();

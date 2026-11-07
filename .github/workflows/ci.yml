@@ -338,11 +338,21 @@ jobs:
       # A new shift replaces the running one, so the house restarts on this commit's code. This
       # doesn't rely on runner.yml listening for CI to finish: once this run was itself started by
       # the workflow token (a later attempt of the SOL wait), that event may not start anything.
+      # A shift that already runs this commit's house code carries on, so a push that only touches
+      # the site, the docs or CI doesn't restart the house mid-round.
       - name: Start the house
         id: start
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          running=$(gh run list -R "$GITHUB_REPOSITORY" --workflow runner.yml --status in_progress \
+            --json headSha --jq '.[0].headSha // empty' 2>/dev/null) || running=""
+          if [ -n "$running" ] && git fetch -q --depth=1 origin "$running" 2>/dev/null &&
+            git diff --quiet "$running" HEAD -- apps/runner packages/sdk programs scripts/house-shift.sh \
+              .github/workflows/runner.yml package.json pnpm-lock.yaml pnpm-workspace.yaml; then
+            echo "The running house shift (${running:0:7}) has this commit's house code; it carries on." | tee -a ci-out/deploy.log
+            exit 0
+          fi
           for _ in 1 2 3; do
             if gh workflow run runner.yml -R "$GITHUB_REPOSITORY" --ref main; then
               echo "Started a house shift." | tee -a ci-out/deploy.log

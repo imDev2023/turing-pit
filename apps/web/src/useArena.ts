@@ -228,38 +228,56 @@ export function useArena(): ArenaState {
     };
   }, [connection, roundAddress, tick]);
 
-  // What the agents said, every 12 seconds.
+  // What the agents said, every 12 seconds. Transactions are fetched one at a time, so one the
+  // RPC refuses (busy public RPCs answer 429) or can't return yet is simply tried on the next
+  // pass, which comes sooner after a miss.
   useEffect(() => {
     if (!PROGRAM_ID) return;
     let cancelled = false;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const misses = new Map<string, number>();
     const load = async () => {
       const agents = rowsRef.current.filter((r) => r.entrant.kind === KIND_AGENT);
-      try {
-        const fresh: { sig: string; label: string }[] = [];
-        for (const a of agents) {
-          const sigs = await connection.getSignaturesForAddress(a.entrant.player, { limit: 6 });
-          for (const s of sigs) if (!seen.current.has(s.signature)) fresh.push({ sig: s.signature, label: a.entrant.label });
-        }
-        if (fresh.length) {
-          const txs = await connection.getParsedTransactions(
-            fresh.map((f) => f.sig),
-            { maxSupportedTransactionVersion: 0 },
-          );
-          txs.forEach((tx, i) => seen.current.set(fresh[i].sig, tx ? parseThought(tx, fresh[i].sig, fresh[i].label) : null));
-        }
+      let missed = agents.length === 0;
+      for (const a of agents) {
         if (cancelled) return;
-        const all = [...seen.current.values()].filter((t): t is Thought => t !== null);
-        setThoughts(all.sort((a, b) => b.ts - a.ts).slice(0, 30));
-      } catch {
-        // The feed is best-effort; the next pass retries.
+        let sigs: Awaited<ReturnType<typeof connection.getSignaturesForAddress>>;
+        try {
+          sigs = await connection.getSignaturesForAddress(a.entrant.player, { limit: 6 });
+        } catch {
+          missed = true;
+          continue;
+        }
+        for (const s of sigs) {
+          if (cancelled) return;
+          if (seen.current.has(s.signature)) continue;
+          if (s.err) {
+            seen.current.set(s.signature, null);
+            continue;
+          }
+          try {
+            const tx = await connection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0 });
+            const tries = (misses.get(s.signature) ?? 0) + 1;
+            if (tx) seen.current.set(s.signature, parseThought(tx, s.signature, a.entrant.label));
+            else if (tries >= 5) seen.current.set(s.signature, null);
+            else {
+              misses.set(s.signature, tries);
+              missed = true;
+            }
+          } catch {
+            missed = true;
+          }
+        }
       }
+      if (cancelled) return;
+      const all = [...seen.current.values()].filter((x): x is Thought => x !== null);
+      setThoughts(all.sort((a, b) => b.ts - a.ts).slice(0, 30));
+      t = setTimeout(load, missed ? 3000 : 12000);
     };
-    const first = setTimeout(load, 1500);
-    const t = setInterval(load, 12000);
+    t = setTimeout(load, 1500);
     return () => {
       cancelled = true;
-      clearTimeout(first);
-      clearInterval(t);
+      clearTimeout(t);
     };
   }, [connection]);
 
