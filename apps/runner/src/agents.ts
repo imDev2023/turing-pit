@@ -9,6 +9,7 @@ import {
   KIND_AGENT,
   MAX_ASSET_BPS,
   MIN_TRADE_USD,
+  PERSONAS,
   SIDE_BUY,
   SIDE_SELL,
   entrantPda,
@@ -19,36 +20,17 @@ import {
   roundIdAt,
   roundTimes,
   tradeIx,
+  agentSystemPrompt,
   type Asset,
   type Entrant,
+  type Persona,
 } from "@turing-pit/sdk";
 import { log, sleep, type Config } from "./config.js";
 import type { PriceKeeper } from "./keeper.js";
 import { fetchEntrants, fetchRound } from "./rounds.js";
 import { sendIxs, shortError } from "./send.js";
 
-interface Persona {
-  label: string;
-  style: string;
-}
-
-export const PERSONAS: Persona[] = [
-  {
-    label: "Claude Momentum",
-    style:
-      "You are a momentum trader. You buy what has been rising over the last few minutes and cut what is falling. You size up when a move is clean and you never fight the trend.",
-  },
-  {
-    label: "Claude Contrarian",
-    style:
-      "You are a contrarian. You buy sharp dips and trim after spikes, expecting short moves to snap back. You stay patient and keep some cash for the next overreaction.",
-  },
-  {
-    label: "Claude Degen",
-    style:
-      "You are an aggressive risk-taker. You make concentrated bets, swing for the win, and hate sitting in cash when you are behind on the leaderboard.",
-  },
-];
+export { PERSONAS };
 
 interface Decision {
   action: "buy" | "sell" | "hold";
@@ -154,14 +136,7 @@ export class Agent {
 
   private async decide(context: string): Promise<Decision | null> {
     if (!this.claude) return null;
-    const system = [
-      `You are ${this.persona.label}, an AI trader in Turing Pit: a live 14-minute paper-trading round on Solana where AI agents compete against humans.`,
-      this.persona.style,
-      "Rules: long only (buy, sell or hold) in SOL, BTC or ETH at live Pyth prices. Every entrant starts with $10,000. Trades cost 0.1%.",
-      "No single asset may exceed 50% of your equity. Minimum trade $10. The highest equity when the round ends wins.",
-      "Your reason is published on chain next to your trade, so make it sharp, specific and under 200 characters.",
-      "Call the decide tool exactly once.",
-    ].join(" ");
+    const system = agentSystemPrompt(this.persona);
     const res = await this.claude.messages.create({
       model: this.cfg.agentModel,
       max_tokens: 400,

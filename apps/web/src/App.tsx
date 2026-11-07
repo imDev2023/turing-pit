@@ -8,9 +8,11 @@ import {
   KIND_AGENT,
   KIND_HUMAN,
   MAX_ASSET_BPS,
+  PERSONAS,
   ROUND_SECONDS,
   SIDE_BUY,
   SIDE_SELL,
+  agentSystemPrompt,
   explainError,
   joinRoundIx,
   memoIx,
@@ -19,7 +21,7 @@ import {
   type Asset,
 } from "@turing-pit/sdk";
 import { PROGRAM_ID, explorerAddress, explorerTx } from "./config";
-import { useArena, type ArenaState, type Row, type Thought } from "./useArena";
+import { useArena, type ArenaState, type PastRound, type Row, type Thought } from "./useArena";
 
 type Phase = "live" | "settling";
 
@@ -93,9 +95,34 @@ export function App() {
           <div className="stack">
             <Leaderboard arena={arena} />
             <Seat arena={arena} phase={phase} />
+            <History rounds={arena.history} />
           </div>
           <Thoughts thoughts={arena.thoughts} now={arena.now} />
         </main>
+
+        <section className="agents" aria-labelledby="agents-title">
+          <div className="panel-head">
+            <h2 id="agents-title">The agents</h2>
+            <span className="hint">Each one is Claude with its own wallet and its own style</span>
+          </div>
+          <ul>
+            {PERSONAS.map((p) => (
+              <li key={p.label}>
+                <span className="badge" aria-hidden>
+                  {badge(p.label, true)}
+                </span>
+                <div>
+                  <h3>{p.label}</h3>
+                  <p>{p.style}</p>
+                  <details>
+                    <summary>Read the full prompt</summary>
+                    <p className="prompt">{agentSystemPrompt(p)}</p>
+                  </details>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
 
         <footer className="foot">
           <h2>How a round works</h2>
@@ -145,8 +172,45 @@ function Scoreboard({ arena }: { arena: ArenaState }) {
         <b>{human}</b>
         <span>human wins</span>
       </div>
-      <p className="score-note">{rounds ? `Out of the last ${rounds} settled rounds.` : "No rounds settled yet today."}</p>
+      <p className="score-note">
+        {rounds
+          ? `Rounds won in the last six hours where humans and agents both played.`
+          : "No human has played the agents in the last six hours. Be the first."}
+      </p>
     </div>
+  );
+}
+
+function History({ rounds }: { rounds: PastRound[] }) {
+  if (!rounds.length) return null;
+  return (
+    <section className="history">
+      <div className="panel-head">
+        <h2>Recent rounds</h2>
+        <span className="hint">Winners as recorded by the program</span>
+      </div>
+      <ol>
+        {rounds.map((r) => {
+          const ai = r.winnerKind === KIND_AGENT;
+          const pnl = ((r.winnerEquity - r.startCash) / r.startCash) * 100;
+          const humans = r.entrants - r.agents;
+          return (
+            <li key={r.roundId} className={ai ? "is-ai" : "is-human"}>
+              <span className="when">{utc(r.start)}</span>
+              <span className="badge small" aria-hidden>
+                {badge(r.winnerLabel, ai)}
+              </span>
+              <span className="who">
+                {r.winnerLabel} won with {usd(r.winnerEquity)} <span className={pnl >= 0 ? "up" : "down"}>{pct(pnl)}</span>
+              </span>
+              <span className="field-size">
+                {r.agents} {r.agents === 1 ? "agent" : "agents"}, {humans} {humans === 1 ? "human" : "humans"}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 
@@ -277,7 +341,7 @@ function Thoughts({ thoughts, now }: { thoughts: Thought[]; now: number }) {
 }
 
 function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
-  const { publicKey, sendTransaction, connected } = useWallet();
+  const { publicKey, sendTransaction, signTransaction, connected } = useWallet();
   const { connection } = useConnection();
   const [name, setName] = useState("");
   const [asset, setAsset] = useState<Asset>("SOL");
@@ -312,9 +376,23 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
       const latest = await connection.getLatestBlockhash("confirmed");
       tx.feePayer = publicKey;
       tx.recentBlockhash = latest.blockhash;
-      const sig = await sendTransaction(tx, connection);
-      const res = await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
-      if (res.value.err) throw new Error(JSON.stringify(res.value.err));
+      let sig: string;
+      let resend: ReturnType<typeof setInterval> | undefined;
+      if (signTransaction) {
+        // Sign in the wallet, then send to devnet ourselves, so it works whichever network the
+        // wallet is showing; re-send every two seconds until it lands.
+        const raw = (await signTransaction(tx)).serialize();
+        sig = await connection.sendRawTransaction(raw, { maxRetries: 0 });
+        resend = setInterval(() => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined), 2000);
+      } else {
+        sig = await sendTransaction(tx, connection);
+      }
+      try {
+        const res = await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
+        if (res.value.err) throw new Error(JSON.stringify(res.value.err));
+      } finally {
+        clearInterval(resend);
+      }
       setMsg({ ok: true, text: done, sig });
       arena.refresh();
     } catch (e) {

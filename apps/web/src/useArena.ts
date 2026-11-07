@@ -15,6 +15,7 @@ import {
   decodePriceUpdate,
   decodeRound,
   decodeTradeData,
+  entrantPda,
   equityOf,
   feedAccounts,
   reasonHash,
@@ -47,7 +48,19 @@ export interface Thought {
 export interface Tally {
   ai: number;
   human: number;
+  /** Settled rounds in which at least one human and one agent played. */
   rounds: number;
+}
+
+export interface PastRound {
+  roundId: number;
+  start: number;
+  entrants: number;
+  agents: number;
+  winnerLabel: string;
+  winnerKind: number;
+  winnerEquity: number;
+  startCash: number;
 }
 
 export interface ArenaState {
@@ -61,6 +74,7 @@ export interface ArenaState {
   prices: (PythPrice | null)[];
   thoughts: Thought[];
   tally: Tally;
+  history: PastRound[];
   error: string | null;
   ready: boolean;
   refresh: () => void;
@@ -104,6 +118,7 @@ export function useArena(): ArenaState {
   const [prices, setPrices] = useState<(PythPrice | null)[]>([null, null, null]);
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [tally, setTally] = useState<Tally>({ ai: 0, human: 0, rounds: 0 });
+  const [history, setHistory] = useState<PastRound[]>([]);
   const [error, setError] = useState<string | null>(PROGRAM_ID && AUTHORITY ? null : "This build has no program id yet.");
   const [ready, setReady] = useState(false);
   const [tick, setTick] = useState(0);
@@ -201,7 +216,7 @@ export function useArena(): ArenaState {
     };
   }, [connection]);
 
-  // Machines vs humans over the last 24 rounds, every minute.
+  // Machines vs humans, and the recent winners, over the last 24 rounds (six hours), every minute.
   useEffect(() => {
     if (!PROGRAM_ID || !AUTHORITY) return;
     let cancelled = false;
@@ -211,14 +226,37 @@ export function useArena(): ArenaState {
       try {
         const infos = await connection.getMultipleAccountsInfo(ids.map((id) => roundPda(PROGRAM_ID!, AUTHORITY!, id)));
         const next: Tally = { ai: 0, human: 0, rounds: 0 };
-        for (const info of infos) {
+        const done: { address: PublicKey; round: Round }[] = [];
+        infos.forEach((info, i) => {
           const r = info ? decodeRound(info.data) : null;
-          if (!r || !r.finalized || r.entrants === 0) continue;
+          if (!r || !r.finalized || r.entrants === 0) return;
+          done.push({ address: roundPda(PROGRAM_ID!, AUTHORITY!, ids[i]), round: r });
+          if (r.agents === 0 || r.entrants === r.agents) return; // uncontested
           next.rounds++;
           if (r.winnerKind === KIND_AGENT) next.ai++;
           else next.human++;
+        });
+        const recent = done.slice(0, 8);
+        const winners = recent.length
+          ? await connection.getMultipleAccountsInfo(recent.map((d) => entrantPda(PROGRAM_ID!, d.address, d.round.winner)))
+          : [];
+        const past: PastRound[] = recent.map((d, i) => {
+          const w = winners[i] ? decodeEntrant(winners[i]!.data) : null;
+          return {
+            roundId: d.round.roundId,
+            start: d.round.startTs,
+            entrants: d.round.entrants,
+            agents: d.round.agents,
+            winnerLabel: w?.label || d.round.winner.toBase58().slice(0, 6),
+            winnerKind: d.round.winnerKind,
+            winnerEquity: d.round.winnerEquity,
+            startCash: d.round.startCash,
+          };
+        });
+        if (!cancelled) {
+          setTally(next);
+          setHistory(past);
         }
-        if (!cancelled) setTally(next);
       } catch {
         // retried next minute
       }
@@ -242,6 +280,7 @@ export function useArena(): ArenaState {
     prices,
     thoughts,
     tally,
+    history,
     error,
     ready,
     refresh: () => setTick((t) => t + 1),
