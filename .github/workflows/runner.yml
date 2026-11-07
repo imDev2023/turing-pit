@@ -42,6 +42,7 @@ jobs:
         env:
           PIT_SEED: ${{ secrets.PIT_SEED }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTH_API_KEY: ${{ secrets.PYTH_API_KEY }}
           RPC_URL: ${{ secrets.RPC_URL }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
           GITHUB_TOKEN: ${{ github.token }}

@@ -2,8 +2,12 @@
 
 import { LAMPORTS_PER_SOL, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
+  CLOSE_DELAY_SECONDS,
   ENTRANT_SIZE,
+  PRICE_AGE_KEEPER,
   ROUND_SECONDS,
+  SHARD_ID,
+  closeEntrantIx,
   createRoundIx,
   decodeEntrant,
   decodeRound,
@@ -16,6 +20,7 @@ import {
   type Round,
 } from "@turing-pit/sdk";
 import { log, sleep, type Config } from "./config.js";
+import type { PriceSource } from "./keeper.js";
 import { sendIxs, shortError } from "./send.js";
 
 export async function fetchRound(cfg: Config, roundId: number): Promise<{ address: PublicKey; round: Round } | null> {
@@ -37,11 +42,16 @@ export async function fetchEntrants(cfg: Config, round: PublicKey): Promise<{ ad
 export class RoundManager {
   private closed = new Set<number>();
 
-  constructor(private cfg: Config) {}
+  /** `prices` picks each new round's price feeds; by default the keeper's own shard. */
+  constructor(
+    private cfg: Config,
+    private prices: { source(): PriceSource } = { source: () => ({ shardId: SHARD_ID, maxPriceAge: PRICE_AGE_KEEPER }) },
+  ) {}
 
   private async ensureRound(roundId: number) {
     if (await fetchRound(this.cfg, roundId)) return;
     const { start, end } = roundTimes(roundId);
+    const src = this.prices.source();
     try {
       const sig = await sendIxs(
         this.cfg.connection,
@@ -52,11 +62,14 @@ export class RoundManager {
             roundId,
             startTs: start,
             endTs: end,
+            shardId: src.shardId,
+            maxPriceAge: src.maxPriceAge,
           }),
         ],
         [this.cfg.keys.authority],
       );
-      log("rounds", `opened round ${roundId} (${new Date(start * 1000).toISOString().slice(11, 16)} UTC)`, sig);
+      const feeds = src.shardId === SHARD_ID ? "the house's own Pyth updates" : `Pyth's sponsored feeds (shard ${src.shardId})`;
+      log("rounds", `opened round ${roundId} (${new Date(start * 1000).toISOString().slice(11, 16)} UTC) on ${feeds}, prices up to ${src.maxPriceAge}s old`, sig);
     } catch (e) {
       log("rounds", `could not open round ${roundId}:`, shortError(e));
     }
@@ -74,7 +87,9 @@ export class RoundManager {
       try {
         await sendIxs(
           this.cfg.connection,
-          batch.map((e) => settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address })),
+          batch.map((e) =>
+            settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address, shardId: found.round.shardId }),
+          ),
           [this.cfg.keys.authority],
           { computeUnits: 400_000 },
         );
@@ -130,8 +145,45 @@ export class RoundManager {
     }
   }
 
+  /**
+   * Closes the player accounts of rounds that ended more than three hours ago. The rent goes back
+   * to each player, mostly the house's own agents, which keeps the arena cheap to run.
+   */
+  private async tidyUp() {
+    const now = Math.floor(Date.now() / 1000);
+    const accounts = await this.cfg.connection.getProgramAccounts(this.cfg.programId, {
+      filters: [{ dataSize: ENTRANT_SIZE }],
+    });
+    const byRound = new Map<string, PublicKey[]>();
+    for (const a of accounts) {
+      const e = decodeEntrant(a.account.data);
+      if (e) byRound.set(e.round.toBase58(), [...(byRound.get(e.round.toBase58()) ?? []), e.player]);
+    }
+    for (const [key, players] of byRound) {
+      const round = new PublicKey(key);
+      const info = await this.cfg.connection.getAccountInfo(round);
+      const r = info ? decodeRound(info.data) : null;
+      if (!r?.finalized || now < r.endTs + CLOSE_DELAY_SECONDS + 30) continue;
+      for (let i = 0; i < players.length; i += 8) {
+        const batch = players.slice(i, i + 8);
+        const closer = this.cfg.keys.authority;
+        try {
+          await sendIxs(
+            this.cfg.connection,
+            batch.map((player) => closeEntrantIx({ programId: this.cfg.programId, round, player, closer: closer.publicKey })),
+            [closer],
+          );
+          log("rounds", `closed ${batch.length} player account(s) from round ${r.roundId}; their rent went back to the players`);
+        } catch (e) {
+          log("rounds", `closing player accounts from round ${r.roundId} failed:`, shortError(e));
+        }
+      }
+    }
+  }
+
   async run(until: number) {
     let lastTopUp = 0;
+    let lastTidy = 0;
     while (Date.now() < until) {
       const now = Math.floor(Date.now() / 1000);
       const current = roundIdAt(now);
@@ -146,6 +198,10 @@ export class RoundManager {
         if (Date.now() - lastTopUp > 120_000) {
           lastTopUp = Date.now();
           await this.topUpAgents();
+        }
+        if (Date.now() - lastTidy > 600_000) {
+          lastTidy = Date.now();
+          await this.tidyUp();
         }
       } catch (e) {
         log("rounds", "loop error:", shortError(e));

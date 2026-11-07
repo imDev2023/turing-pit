@@ -16,6 +16,9 @@ export function loadConfig() {
     programId: keys.program.publicKey,
     connection: new Connection(rpcUrl, { commitment: "confirmed" }),
     hermesUrl: env("HERMES_URL", "https://hermes.pyth.network"),
+    /** Hermes needs a Pyth API key. Without one the house can't post its own fresh prices and
+     *  the rounds run on Pyth's sponsored devnet feeds instead. */
+    pythApiKey: process.env.PYTH_API_KEY ?? "",
     anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
     agentModel: env("AGENT_MODEL", "claude-haiku-5-5"),
     /** How long this run lasts before exiting, so CI can restart it cleanly. */

@@ -11,6 +11,8 @@ import {
   ENTRANT_SIZE,
   KIND_AGENT,
   MEMO_PROGRAM_ID,
+  SHARD_ID,
+  SPONSORED_SHARD_ID,
   bytesToHex,
   decodeEntrant,
   decodePriceUpdate,
@@ -145,12 +147,21 @@ export function useArena(): ArenaState {
   useEffect(() => {
     if (!PROGRAM_ID || !roundAddress) return;
     let cancelled = false;
-    const feeds = feedAccounts();
+    // Both price sources a round can use: the house keeper's shard and Pyth's sponsored feeds.
+    const shards = [SHARD_ID, SPONSORED_SHARD_ID];
+    const feeds = shards.flatMap((s) => feedAccounts(s));
     const load = async () => {
       try {
         const [roundInfo, ...feedInfos] = await connection.getMultipleAccountsInfo([roundAddress, ...feeds]);
         const r = roundInfo ? decodeRound(roundInfo.data) : null;
-        const p = feedInfos.map((f) => (f ? decodePriceUpdate(f.data) : null));
+        const sets = shards.map((_, k) => feedInfos.slice(k * 3, k * 3 + 3).map((f) => (f ? decodePriceUpdate(f.data) : null)));
+        // Show the round's own feeds; before a round exists, whichever source is fresher.
+        const newest = (set: (PythPrice | null)[]) => Math.max(...set.map((x) => x?.publishTime ?? 0));
+        let p = r ? sets[shards.indexOf(r.shardId)] : [...sets].sort((a, b) => newest(b) - newest(a))[0];
+        if (!p && r) {
+          const own = await connection.getMultipleAccountsInfo(r.feeds);
+          p = own.map((f) => (f ? decodePriceUpdate(f.data) : null));
+        }
         const live = p.map((x) => x?.price ?? 0) as [number, number, number];
         let next: Row[] = [];
         if (r) {

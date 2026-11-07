@@ -1,8 +1,12 @@
 // Live-path test. scripts/live-local.sh starts a local validator with our program and copies of
-// Pyth's receiver, push oracle and Wormhole programs (with the receiver's config and Wormhole's
-// guardian sets) from devnet, then runs this file. Real Hermes updates go through the real price
-// keeper, the program trades against the accounts the keeper posts, and with ANTHROPIC_API_KEY
-// set each Claude agent makes one real decision. Nothing is sent to devnet itself.
+// Pyth's receiver, push oracle and Wormhole programs (with the receiver's config, Wormhole's
+// guardian sets and Pyth's sponsored price accounts) from devnet, then runs this file. It checks
+// the parts the end-to-end test fakes, in both price modes:
+//   - Pyth's sponsored devnet feeds (shard 0): the program trades on the copied accounts;
+//   - with PYTH_API_KEY, the real keeper posts Hermes updates to our shard and the program
+//     trades on those;
+//   - with ANTHROPIC_API_KEY, each Claude agent makes one real decision in a house round.
+// Nothing is sent to devnet itself.
 //
 //   tsx src/live-local.ts --clone-args   prints the validator's clone flags, one per line
 //   tsx src/live-local.ts                runs the checks against RPC_URL (default localhost)
@@ -20,22 +24,26 @@ import {
   FEED_IDS,
   KIND_HUMAN,
   PERSONAS,
+  PRICE_AGE_KEEPER,
+  PRICE_AGE_SPONSORED,
   PYTH_PUSH_ORACLE_ID,
   PYTH_RECEIVER_ID,
+  SHARD_ID,
   SIDE_BUY,
   SIDE_SELL,
+  SPONSORED_SHARD_ID,
   bytesToHex,
   createRoundIx,
   decodeEntrant,
   decodePriceUpdate,
+  decodeRound,
   entrantPda,
-  feedAccount,
+  feedAccounts,
   joinRoundIx,
   memoIx,
   reasonHash,
   roundIdAt,
   roundPda,
-  roundTimes,
   tradeIx,
   type Entrant,
   type PythPrice,
@@ -59,6 +67,7 @@ function cloneArgs(): string[] {
   ];
   // Hermes updates are signed by the current guardian set; copy every set that exists.
   for (let i = 0; i < 10; i++) args.push("--maybe-clone", getGuardianSetPda(i, DEFAULT_WORMHOLE_PROGRAM_ID).toBase58());
+  for (const f of feedAccounts(SPONSORED_SHARD_ID)) args.push("--clone", f.toBase58());
   return args;
 }
 
@@ -87,8 +96,8 @@ async function chainTime(): Promise<number> {
   return (await connection.getBlockTime(await connection.getSlot("confirmed"))) ?? Math.floor(Date.now() / 1000);
 }
 
-async function postedPrices(): Promise<PythPrice[] | null> {
-  const infos = await connection.getMultipleAccountsInfo(ASSETS.map((a) => feedAccount(a)));
+async function pricesOn(shardId: number): Promise<PythPrice[] | null> {
+  const infos = await connection.getMultipleAccountsInfo(feedAccounts(shardId));
   const prices = infos.map((info) => (info && info.owner.equals(PYTH_RECEIVER_ID) ? decodePriceUpdate(info.data) : null));
   return prices.every((p) => p !== null) ? (prices as PythPrice[]) : null;
 }
@@ -98,12 +107,53 @@ async function entrantOf(programId: PublicKey, round: PublicKey, player: PublicK
   return info ? decodeEntrant(info.data) : null;
 }
 
+/** Opens a round on the given price feeds, joins as a human and buys, then sells, SOL. */
+async function tradeOn(programId: PublicKey, house: Keypair, human: Keypair, shardId: number, maxPriceAge: number) {
+  const send = (ixs: TransactionInstruction[], signers: Keypair[]) => sendIxs(connection, ixs, signers);
+  const now = await chainTime();
+  const roundId = 8_000_000 + shardId * 100_000 + (now % 100_000);
+  const round = roundPda(programId, house.publicKey, roundId);
+  await send(
+    [createRoundIx({ programId, authority: house.publicKey, roundId, startTs: now - 5, endTs: now + 600, shardId, maxPriceAge })],
+    [house],
+  );
+  const r = decodeRound((await connection.getAccountInfo(round))!.data);
+  check(
+    `the round reads shard ${shardId} and allows prices up to ${maxPriceAge}s old`,
+    !!r && r.shardId === shardId && r.maxPriceAge === maxPriceAge && r.feeds.every((f, i) => f.equals(feedAccounts(shardId)[i])),
+    r,
+  );
+  await send([joinRoundIx({ programId, round, player: human.publicKey, kind: KIND_HUMAN, label: "Live test" })], [human]);
+  const why = `Live test: buying SOL on shard ${shardId}`;
+  try {
+    await send(
+      [memoIx(why), tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 1000, reasonHash: reasonHash(why), shardId })],
+      [human],
+    );
+    const e = await entrantOf(programId, round, human.publicKey);
+    const sol = (await pricesOn(shardId))?.[0].price ?? 0;
+    check(
+      `a $1,000 buy fills at the SOL price on the account ($${((e?.qty[0] ?? 0) * sol).toFixed(2)} of SOL, $${e?.cash.toFixed(2)} cash)`,
+      !!e && Math.abs(e.qty[0] * sol - 999) < 10 && Math.abs(e.cash - 9_000) < 0.01,
+      e,
+    );
+    check("the trade stores the reason's hash", !!e && bytesToHex(e.lastReasonHash) === bytesToHex(reasonHash(why)));
+    await send(
+      [tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_SELL, usd: 500, reasonHash: reasonHash(""), shardId })],
+      [human],
+    );
+    const e2 = await entrantOf(programId, round, human.publicKey);
+    check("a sell fills too", !!e2 && e2.qty[0] < (e?.qty[0] ?? 0) && e2.cash > 9_400, e2);
+  } catch (err) {
+    check(`trades go through on shard ${shardId}`, false, (err as Error).message);
+  }
+}
+
 async function main() {
   const keys = houseKeys(process.env.PIT_SEED ?? "");
   const programId = keys.program.publicKey;
   const house = keys.authority;
   const human = Keypair.generate();
-  const send = (ixs: TransactionInstruction[], signers: Keypair[]) => sendIxs(connection, ixs, signers);
 
   console.log("copied programs and accounts");
   const programs: [string, PublicKey][] = [
@@ -121,13 +171,14 @@ async function main() {
   }
   // The receiver moves a small fee into a treasury account per update; make sure ours exists.
   const treasury = getTreasuryPda(TREASURY_ID, PYTH_RECEIVER_ID);
-  await send([SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: treasury, lamports: 0.01 * LAMPORTS_PER_SOL })], [house]);
+  await sendIxs(connection, [SystemProgram.transfer({ fromPubkey: house.publicKey, toPubkey: treasury, lamports: 0.01 * LAMPORTS_PER_SOL })], [house]);
 
   const cfg = {
     keys,
     programId,
     connection,
     hermesUrl: process.env.HERMES_URL || "https://hermes.pyth.network",
+    pythApiKey: process.env.PYTH_API_KEY ?? "",
     anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
     agentModel: process.env.AGENT_MODEL || "claude-haiku-5-5",
     durationMs: 0,
@@ -135,57 +186,48 @@ async function main() {
     agentIntervalMs: 0,
     pythTreasuryId: TREASURY_ID,
   } satisfies Config;
-
-  console.log("price keeper (Hermes -> push oracle, shard 101)");
   const keeper = new PriceKeeper(cfg);
-  void keeper.run(Date.now() + 300_000);
-  const first = await waitFor(async () => {
-    const p = await postedPrices();
-    const now = Math.floor(Date.now() / 1000);
-    return p && p.every((x) => now - x.publishTime < 60) ? p : null;
-  }, 120_000);
-  check("the keeper posts all three feeds to our shard", !!first, keeper.lastError || "no accounts");
-  if (!first) return finish();
-  ASSETS.forEach((a, i) => {
-    const hermes = keeper.latest(a) ?? 0;
-    check(
-      `${a} account: feed id matches, $${first[i].price.toFixed(2)} vs Hermes $${hermes.toFixed(2)}`,
-      first[i].feedId === FEED_IDS[a] && Math.abs(first[i].price - hermes) / hermes < 0.01,
-      first[i],
-    );
-  });
-  const later = await waitFor(async () => {
-    const p = await postedPrices();
-    return p && p[0].publishTime > first[0].publishTime ? p : null;
-  }, 40_000);
-  check("the keeper keeps the accounts fresh", !!later, keeper.lastError);
-  console.log(`  ..    ${keeper.posted} updates posted so far`);
+  void keeper.run(Date.now() + 420_000);
 
-  console.log("trading against the posted accounts");
-  const now = await chainTime();
-  const roundId = 8_000_000 + (now % 100_000);
-  const round = roundPda(programId, house.publicKey, roundId);
-  await send([createRoundIx({ programId, authority: house.publicKey, roundId, startTs: now - 5, endTs: now + 600 })], [house]);
-  await send([joinRoundIx({ programId, round, player: human.publicKey, kind: KIND_HUMAN, label: "Live test" })], [human]);
-  const why = "Live test: buying SOL at the price the keeper just posted";
-  try {
-    await send(
-      [memoIx(why), tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 1000, reasonHash: reasonHash(why) })],
-      [human],
-    );
-    const e = await entrantOf(programId, round, human.publicKey);
-    const sol = (await postedPrices())?.[0].price ?? 0;
-    check(
-      `a $1,000 buy fills at the posted SOL price ($${((e?.qty[0] ?? 0) * sol).toFixed(2)} of SOL, $${e?.cash.toFixed(2)} cash)`,
-      !!e && Math.abs(e.qty[0] * sol - 999) < 10 && Math.abs(e.cash - 9_000) < 0.01,
-      e,
-    );
-    check("the trade stores the reason's hash", !!e && bytesToHex(e.lastReasonHash) === bytesToHex(reasonHash(why)));
-    await send([tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_SELL, usd: 500, reasonHash: reasonHash("") })], [human]);
-    const e2 = await entrantOf(programId, round, human.publicKey);
-    check("a sell fills too", !!e2 && e2.qty[0] < (e?.qty[0] ?? 0) && e2.cash > 9_400, e2);
-  } catch (err) {
-    check("trades go through on live prices", false, (err as Error).message);
+  console.log("Pyth's sponsored devnet feeds (shard 0)");
+  const sponsored = await pricesOn(SPONSORED_SHARD_ID);
+  const now = Math.floor(Date.now() / 1000);
+  check(
+    `devnet's sponsored accounts were copied: ${sponsored?.map((p, i) => `${ASSETS[i]} $${p.price.toFixed(2)} (${now - p.publishTime}s old)`).join(", ")}`,
+    !!sponsored && sponsored.every((p, i) => p.feedId === FEED_IDS[ASSETS[i]]),
+  );
+  if (sponsored && sponsored.some((p) => now - p.publishTime > PRICE_AGE_SPONSORED - 60)) {
+    console.log(`  note  a sponsored price is older than ${PRICE_AGE_SPONSORED - 60}s; Pyth's devnet pusher may be lagging`);
+  }
+  await tradeOn(programId, house, human, SPONSORED_SHARD_ID, PRICE_AGE_SPONSORED);
+
+  console.log("house keeper (Hermes -> push oracle, shard 101)");
+  if (!cfg.pythApiKey) {
+    console.log("  skip  PYTH_API_KEY is not set (Hermes refuses requests without one)");
+  } else {
+    const first = await waitFor(async () => {
+      const p = await pricesOn(SHARD_ID);
+      const t = Math.floor(Date.now() / 1000);
+      return p && p.every((x) => t - x.publishTime < 60) ? p : null;
+    }, 120_000);
+    check("the keeper posts all three feeds to our shard", !!first, keeper.lastError || "no accounts");
+    if (first) {
+      ASSETS.forEach((a, i) => {
+        const hermes = keeper.latest(a) ?? 0;
+        check(
+          `${a} account: feed id matches, $${first[i].price.toFixed(2)} vs Hermes $${hermes.toFixed(2)}`,
+          first[i].feedId === FEED_IDS[a] && Math.abs(first[i].price - hermes) / hermes < 0.01,
+          first[i],
+        );
+      });
+      const later = await waitFor(async () => {
+        const p = await pricesOn(SHARD_ID);
+        return p && p[0].publishTime > first[0].publishTime ? p : null;
+      }, 40_000);
+      check("the keeper keeps the accounts fresh", !!later, keeper.lastError);
+      console.log(`  ..    ${keeper.posted} updates posted so far`);
+      await tradeOn(programId, house, human, SHARD_ID, PRICE_AGE_KEEPER);
+    }
   }
 
   console.log("Claude agents");
@@ -200,10 +242,12 @@ async function main() {
     console.log(`  ..    waiting ${Math.round(wait / 1000)} s for the next round to open`);
     await sleep(wait);
   }
-  await new RoundManager(cfg).run(Date.now() + 6_000);
+  await keeper.ready(30_000);
+  await new RoundManager(cfg, keeper).run(Date.now() + 6_000);
   const current = roundIdAt(Math.floor(Date.now() / 1000));
   const live = roundPda(programId, house.publicKey, current);
-  check("the house opens the scheduled round", !!(await connection.getAccountInfo(live)), roundTimes(current));
+  const liveRound = (await connection.getAccountInfo(live)) ? decodeRound((await connection.getAccountInfo(live))!.data) : null;
+  check(`the house opens the scheduled round on shard ${liveRound?.shardId}`, !!liveRound && liveRound.shardId === keeper.source().shardId);
 
   const claude = new Anthropic({ apiKey: cfg.anthropicKey });
   for (const [i, persona] of PERSONAS.entries()) {
@@ -215,6 +259,7 @@ async function main() {
           try {
             const res = await claude.messages.create(req);
             decision = (res.content.find((b) => b.type === "tool_use") as { input?: Record<string, unknown> } | undefined)?.input;
+            console.log(`  ..    ${persona.label}: ${res.usage.input_tokens} tokens in, ${res.usage.output_tokens} out`);
             return res;
           } catch (e) {
             error = (e as Error).message;

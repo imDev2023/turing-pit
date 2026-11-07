@@ -26,6 +26,12 @@ export const FEED_IDS: Record<Asset, string> = {
 
 /** Our own shard of Pyth push-oracle price feed accounts, kept fresh by the runner's keeper. */
 export const SHARD_ID = 101;
+/** Shard 0 holds Pyth's sponsored feeds, which Pyth itself updates (about every 5 minutes on devnet). */
+export const SPONSORED_SHARD_ID = 0;
+/** Oldest price a trade may fill at, in seconds: with the house's keeper posting every few seconds... */
+export const PRICE_AGE_KEEPER = 60;
+/** ...and on Pyth's sponsored devnet feeds, whose heartbeat is about 5 minutes. */
+export const PRICE_AGE_SPONSORED = 420;
 
 /** Rounds run every 15 minutes: 14 minutes of trading, then a minute to settle. */
 export const ROUND_SECONDS = 900;
@@ -34,6 +40,8 @@ export const START_CASH = 10_000_000_000n; // $10,000 in micro-USD
 export const FEE_BPS = 10; // 0.1%
 export const MAX_ASSET_BPS = 5_000; // at most half of equity in one asset
 export const MIN_TRADE_USD = 10;
+/** Anyone may close a player's account this long after its round ends; the rent goes to the player. */
+export const CLOSE_DELAY_SECONDS = 3 * 60 * 60;
 
 export const KIND_HUMAN = 0;
 export const KIND_AGENT = 1;
@@ -56,6 +64,7 @@ const IX = {
   trade: disc("global:trade"),
   settle: disc("global:settle"),
   finalizeRound: disc("global:finalize_round"),
+  closeEntrant: disc("global:close_entrant"),
 };
 const ACCOUNT = {
   round: disc("account:Round"),
@@ -63,7 +72,7 @@ const ACCOUNT = {
   priceUpdateV2: disc("account:PriceUpdateV2"),
 };
 
-export const ROUND_SIZE = 245;
+export const ROUND_SIZE = 247;
 export const ENTRANT_SIZE = 191;
 
 // ---------- addresses ----------
@@ -177,6 +186,8 @@ export function createRoundIx(args: {
   feeBps?: number;
   maxAssetBps?: number;
   shardId?: number;
+  /** Seconds; see PRICE_AGE_KEEPER and PRICE_AGE_SPONSORED. */
+  maxPriceAge?: number;
 }): TransactionInstruction {
   const round = roundPda(args.programId, args.authority, args.roundId);
   return new TransactionInstruction({
@@ -191,6 +202,7 @@ export function createRoundIx(args: {
       u16le(args.feeBps ?? FEE_BPS),
       u16le(args.maxAssetBps ?? MAX_ASSET_BPS),
       u16le(args.shardId ?? SHARD_ID),
+      u16le(args.maxPriceAge ?? PRICE_AGE_KEEPER),
     ),
   });
 }
@@ -284,6 +296,26 @@ export function finalizeRoundIx(args: {
   });
 }
 
+/** Closes a player's account in a finalized round; the rent goes back to the player. */
+export function closeEntrantIx(args: {
+  programId: PublicKey;
+  round: PublicKey;
+  player: PublicKey;
+  /** Signs; the player itself, or anyone once CLOSE_DELAY_SECONDS have passed. */
+  closer: PublicKey;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [
+      meta(args.round, false, false),
+      meta(entrantPda(args.programId, args.round, args.player), false, true),
+      meta(args.player, false, true),
+      meta(args.closer, true, false),
+    ],
+    data: concat(IX.closeEntrant),
+  });
+}
+
 export function memoIx(text: string): TransactionInstruction {
   return new TransactionInstruction({
     programId: MEMO_PROGRAM_ID,
@@ -340,6 +372,8 @@ export interface Round {
   winnerKind: number;
   bestHumanEquity: number;
   bestAgentEquity: number;
+  /** Seconds: the oldest price a trade may fill at in this round. */
+  maxPriceAge: number;
 }
 
 export function decodeRound(data: Uint8Array): Round | null {
@@ -366,6 +400,7 @@ export function decodeRound(data: Uint8Array): Round | null {
     winnerKind: data[227],
     bestHumanEquity: Number(u64(228)) / MICRO,
     bestAgentEquity: Number(u64(236)) / MICRO,
+    maxPriceAge: dv.getUint16(245, true),
   };
 }
 
@@ -459,6 +494,8 @@ export const PIT_ERRORS = [
   "Not an entrant of this round",
   "Entrant listed twice",
   "Every entrant must be settled first",
+  "The round is not finalized yet",
+  "Only the player can close this account until three hours after the round",
 ];
 
 /** Turns a transaction error into something a player can read. */

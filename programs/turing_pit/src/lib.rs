@@ -48,15 +48,21 @@ pub const SIDE_SELL: u8 = 1;
 
 /// Smallest trade: $10, in micro-USD.
 pub const MIN_TRADE_USD: u64 = 10_000_000;
-/// A trade must use a price published in the last minute. The house keeper posts every few
-/// seconds; the slack covers keeper hiccups and devnet's clock drifting from wall time.
-pub const MAX_PRICE_AGE_TRADE: i64 = 60;
-/// Marking a portfolio (other assets in a trade, settlement) accepts prices up to 5 minutes old.
+/// How old the traded asset's price may be is set per round (`Round::max_price_age`): about a
+/// minute when the house posts fresh Pyth updates every few seconds, longer on Pyth's sponsored
+/// devnet feeds, which update every five minutes or so. Allowed range, in seconds:
+pub const MIN_PRICE_AGE: u16 = 10;
+pub const MAX_PRICE_AGE: u16 = 900;
+/// Marking a portfolio (other assets in a trade, settlement) accepts prices up to 5 minutes old,
+/// or the round's own limit if that is longer.
 pub const MAX_PRICE_AGE_MARK: i64 = 300;
 /// Entrants per round, kept small so one transaction can finalize the round.
 pub const MAX_ENTRANTS: u32 = 24;
 /// Joining closes 30 seconds before the round ends.
 pub const JOIN_CUTOFF_SECS: i64 = 30;
+/// Anyone may close a player's account (refunding its rent to the player) this long after the
+/// round ends, so recent results stay readable; the player may close it as soon as it's final.
+pub const CLOSE_DELAY_SECS: i64 = 3 * 60 * 60;
 
 #[program]
 pub mod turing_pit {
@@ -72,6 +78,7 @@ pub mod turing_pit {
         fee_bps: u16,
         max_asset_bps: u16,
         shard_id: u16,
+        max_price_age: u16,
     ) -> Result<()> {
         require!(end_ts > start_ts, PitError::BadSchedule);
         require!(end_ts - start_ts <= 86_400, PitError::BadSchedule);
@@ -82,6 +89,10 @@ pub mod turing_pit {
         );
         require!(
             (1_000_000_000..=1_000_000_000_000).contains(&start_cash),
+            PitError::BadParams
+        );
+        require!(
+            (MIN_PRICE_AGE..=MAX_PRICE_AGE).contains(&max_price_age),
             PitError::BadParams
         );
 
@@ -107,6 +118,7 @@ pub mod turing_pit {
         round.best_human_equity = 0;
         round.best_agent_equity = 0;
         round.bump = ctx.bumps.round;
+        round.max_price_age = max_price_age;
 
         emit!(RoundCreated {
             round: round.key(),
@@ -352,6 +364,22 @@ pub mod turing_pit {
         });
         Ok(())
     }
+
+    /// Closes a player's account once its round is finalized; the rent always goes back to the
+    /// player. The player can do it straight away, anyone else after `CLOSE_DELAY_SECS`. The
+    /// round keeps its results and counts.
+    pub fn close_entrant(ctx: Context<CloseEntrant>) -> Result<()> {
+        let round = &ctx.accounts.round;
+        require!(round.finalized, PitError::NotFinalized);
+        if ctx.accounts.closer.key() != ctx.accounts.player.key() {
+            let now = Clock::get()?.unix_timestamp;
+            require!(
+                now >= round.end_ts.saturating_add(CLOSE_DELAY_SECS),
+                PitError::TooEarlyToClose
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Address of the Pyth push-oracle price feed account for a shard and feed id.
@@ -360,7 +388,7 @@ pub fn price_feed_account(shard_id: u16, feed_id: &[u8; 32]) -> Pubkey {
 }
 
 /// Reads all three prices (micro-USD per whole coin). `fresh` marks the asset being traded,
-/// which must be fresher than the others.
+/// whose price must be within the round's `max_price_age`; the others are only marked.
 fn load_prices(
     round: &Round,
     accounts: [&AccountInfo; NUM_ASSETS],
@@ -368,13 +396,14 @@ fn load_prices(
     fresh: Option<usize>,
 ) -> Result<[u64; NUM_ASSETS]> {
     let mut out = [0u64; NUM_ASSETS];
+    let trade_age = round.max_price_age as i64;
     for i in 0..NUM_ASSETS {
         let info = accounts[i];
         require_keys_eq!(*info.key, round.feeds[i], PitError::BadPriceAccount);
         let max_age = if fresh == Some(i) {
-            MAX_PRICE_AGE_TRADE
+            trade_age
         } else {
-            MAX_PRICE_AGE_MARK
+            MAX_PRICE_AGE_MARK.max(trade_age)
         };
         out[i] = read_pyth_price(info, &FEED_IDS[i], now, max_age)?;
     }
@@ -497,6 +526,17 @@ pub struct FinalizeRound<'info> {
     pub round: Account<'info, Round>,
 }
 
+#[derive(Accounts)]
+pub struct CloseEntrant<'info> {
+    pub round: Account<'info, Round>,
+    #[account(mut, has_one = round, has_one = player, close = player)]
+    pub entrant: Account<'info, Entrant>,
+    /// CHECK: the entrant's player (checked by `has_one`); receives the rent.
+    #[account(mut)]
+    pub player: UncheckedAccount<'info>,
+    pub closer: Signer<'info>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct Round {
@@ -521,6 +561,8 @@ pub struct Round {
     pub best_human_equity: u64,
     pub best_agent_equity: u64,
     pub bump: u8,
+    /// Seconds: the oldest price a trade may fill at (see `MIN_PRICE_AGE`..`MAX_PRICE_AGE`).
+    pub max_price_age: u16,
 }
 
 #[account]
@@ -639,6 +681,10 @@ pub enum PitError {
     DuplicateEntrant,
     #[msg("Every entrant must be settled first")]
     NotSettled,
+    #[msg("The round is not finalized yet")]
+    NotFinalized,
+    #[msg("Only the player can close this account until three hours after the round")]
+    TooEarlyToClose,
 }
 
 #[cfg(test)]
@@ -648,7 +694,7 @@ mod layout_tests {
     /// The TypeScript client decodes accounts at fixed offsets; these sizes pin the layout.
     #[test]
     fn account_sizes_match_client() {
-        assert_eq!(8 + Round::INIT_SPACE, 245);
+        assert_eq!(8 + Round::INIT_SPACE, 247);
         assert_eq!(8 + Entrant::INIT_SPACE, 191);
     }
 }

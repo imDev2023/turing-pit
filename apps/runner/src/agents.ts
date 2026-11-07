@@ -119,11 +119,12 @@ export class Agent {
     const rank = board.findIndex((b) => b.label === me.label) + 1;
     const lines = [
       `Time left in the round: ${Math.floor(secondsLeft / 60)}m ${secondsLeft % 60}s.`,
-      "Prices now (and % change over 1 and 5 minutes):",
+      "Pyth prices now (% change over 1 and 5 minutes; how long ago the price was published):",
       ...ASSETS.map((a, i) => {
         const c1 = this.keeper.change(a, 60);
         const c5 = this.keeper.change(a, 300);
-        return `  ${a}: $${fmt(prices[i])} (${c1 === undefined ? "n/a" : fmt(c1, 3)}%, ${c5 === undefined ? "n/a" : fmt(c5, 3)}%)`;
+        const pct = (c: number | undefined) => (c === undefined ? "n/a" : `${fmt(c, 3)}%`);
+        return `  ${a}: $${fmt(prices[i])} (1m ${pct(c1)}, 5m ${pct(c5)}; ${this.keeper.age(a) ?? "?"}s ago)`;
       }),
       `Your cash: $${fmt(me.cash)}. Holdings: ${ASSETS.map((a, i) => `${a} ${fmt(me.qty[i], 6)} ($${fmt(me.qty[i] * prices[i])})`).join(", ")}.`,
       `Your equity: $${fmt(equity)} (started at $10,000.00). Rank ${rank} of ${board.length}.`,
@@ -206,6 +207,12 @@ export class Agent {
       log(this.label, `holds: ${decision.reason}`);
       return;
     }
+    // The program refuses fills at prices older than the round allows; don't pay for a failed trade.
+    const age = this.keeper.age(order.asset);
+    if (age !== undefined && age > found.round.maxPriceAge - 3) {
+      log(this.label, `skips its ${order.asset} trade: the price is ${age}s old, over this round's ${found.round.maxPriceAge}s limit`);
+      return;
+    }
     try {
       const sig = await sendIxs(
         this.cfg.connection,
@@ -219,6 +226,7 @@ export class Agent {
             side: order.side,
             usd: order.usd,
             reasonHash: reasonHash(decision.reason),
+            shardId: found.round.shardId,
           }),
         ],
         [this.wallet],

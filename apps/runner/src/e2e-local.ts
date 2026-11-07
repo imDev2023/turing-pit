@@ -14,10 +14,14 @@ import {
   KIND_AGENT,
   KIND_HUMAN,
   PIT_ERRORS,
+  PRICE_AGE_SPONSORED,
   PYTH_RECEIVER_ID,
+  SHARD_ID,
+  SPONSORED_SHARD_ID,
   SIDE_BUY,
   SIDE_SELL,
   bytesToHex,
+  closeEntrantIx,
   createRoundIx,
   decodeEntrant,
   decodePriceUpdate,
@@ -67,25 +71,36 @@ function priceAccount(feedHex: string, price: number, publishTime: number): Buff
   return b;
 }
 
+/**
+ * Price accounts for the validator: our shard (101) published far in the future, so it never goes
+ * stale, and shard 0 (Pyth's sponsored feeds) published 150 seconds ago, for the price-age checks.
+ */
 function writeFixtures(dir: string) {
   mkdirSync(dir, { recursive: true });
-  const future = Math.floor(Date.now() / 1000) + 7 * 86_400;
-  ASSETS.forEach((a, i) => {
-    const data = priceAccount(FEED_IDS[a], PRICES[i], future);
-    const file = {
-      pubkey: feedAccount(a).toBase58(),
-      account: {
-        lamports: 10_000_000,
-        data: [data.toString("base64"), "base64"],
-        owner: PYTH_RECEIVER_ID.toBase58(),
-        executable: false,
-        rentEpoch: 0,
-        space: data.length,
-      },
-    };
-    writeFileSync(join(dir, `${a.toLowerCase()}.json`), JSON.stringify(file));
-    console.log(feedAccount(a).toBase58(), join(dir, `${a.toLowerCase()}.json`));
-  });
+  const now = Math.floor(Date.now() / 1000);
+  const sets: [number, number][] = [
+    [SHARD_ID, now + 7 * 86_400],
+    [SPONSORED_SHARD_ID, now - 150],
+  ];
+  for (const [shard, publishTime] of sets) {
+    ASSETS.forEach((a, i) => {
+      const data = priceAccount(FEED_IDS[a], PRICES[i], publishTime);
+      const file = {
+        pubkey: feedAccount(a, shard).toBase58(),
+        account: {
+          lamports: 10_000_000,
+          data: [data.toString("base64"), "base64"],
+          owner: PYTH_RECEIVER_ID.toBase58(),
+          executable: false,
+          rentEpoch: 0,
+          space: data.length,
+        },
+      };
+      const path = join(dir, `${a.toLowerCase()}-${shard}.json`);
+      writeFileSync(path, JSON.stringify(file));
+      console.log(feedAccount(a, shard).toBase58(), path);
+    });
+  }
 }
 
 // ---------------------------------------------------------------- scenario
@@ -152,6 +167,27 @@ async function main() {
     const info = await connection.getAccountInfo(feedAccount(a));
     const p = info ? decodePriceUpdate(info.data) : null;
     check(`${a} feed decodes at $${PRICES[i]}`, !!p && Math.abs(p.price - PRICES[i]) < 1e-6 && p.feedId === FEED_IDS[a], p);
+  }
+
+  console.log("price age");
+  {
+    const t0 = await chainTime();
+    const ageRound = (id: number, maxPriceAge: number) =>
+      createRoundIx({ programId, authority: house.publicKey, roundId: id, startTs: t0 - 5, endTs: t0 + 600, shardId: SPONSORED_SHARD_ID, maxPriceAge });
+    await expectFail("a round's price age is at least 10 seconds", send([ageRound(6_000_001, 5)], [house]), msgOf(6001));
+    await expectFail("and at most 15 minutes", send([ageRound(6_000_002, 901)], [house]), msgOf(6001));
+    const strict = roundPda(programId, house.publicKey, 6_000_003);
+    const relaxed = roundPda(programId, house.publicKey, 6_000_004);
+    await send([ageRound(6_000_003, 60), ageRound(6_000_004, PRICE_AGE_SPONSORED)], [house]);
+    check("the round records its price age", decodeRound((await connection.getAccountInfo(relaxed))!.data)?.maxPriceAge === PRICE_AGE_SPONSORED);
+    for (const r of [strict, relaxed]) {
+      await send([joinRoundIx({ programId, round: r, player: human.publicKey, kind: KIND_HUMAN, label: "Farhan" })], [human]);
+    }
+    const buyOn = (r: PublicKey) =>
+      tradeIx({ programId, round: r, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 100, reasonHash: reasonHash("x"), shardId: SPONSORED_SHARD_ID });
+    await expectFail("a one-minute round refuses a price that is minutes old", send([buyOn(strict)], [human]), msgOf(6014));
+    await send([buyOn(relaxed)], [human]);
+    check("a round on Pyth's sponsored feeds accepts it", (await entrant(programId, relaxed, human.publicKey)).trades === 1);
   }
 
   console.log("create_round");
@@ -256,6 +292,11 @@ async function main() {
   const entrants = [human.publicKey, agent.publicKey].map((p) => entrantPda(programId, round, p));
   await expectFail("finalize needs everyone settled", send([finalizeRoundIx({ programId, round, entrants })], [house], 400_000), msgOf(6021));
   await send(entrants.map((e) => settleIx({ programId, round, entrant: e })), [house], 400_000);
+  await expectFail(
+    "an account can't be closed before the round is final",
+    send([closeEntrantIx({ programId, round, player: human.publicKey, closer: human.publicKey })], [human]),
+    msgOf(6022),
+  );
   await expectFail("settling twice is refused", send([settleIx({ programId, round, entrant: entrants[0] })], [house]), msgOf(6016));
   await expectFail("finalize needs every entrant", send([finalizeRoundIx({ programId, round, entrants: [entrants[0]] })], [house]), msgOf(6018));
   await expectFail(
@@ -275,6 +316,20 @@ async function main() {
   check("the agent won", r1.winner.equals(agent.publicKey) && r1.winnerKind === KIND_AGENT, r1.winner.toBase58());
   check("best human and best agent are recorded", Math.abs(r1.bestHumanEquity - expectHuman) < 0.01 && Math.abs(r1.bestAgentEquity - 9998) < 0.01, r1);
   await expectFail("finalize only once", send([finalizeRoundIx({ programId, round, entrants })], [house]), msgOf(6017));
+  await expectFail(
+    "others can't close a player's account until three hours after the round",
+    send([closeEntrantIx({ programId, round, player: human.publicKey, closer: house.publicKey })], [house]),
+    msgOf(6023),
+  );
+  const before = await connection.getBalance(human.publicKey);
+  await send([closeEntrantIx({ programId, round, player: human.publicKey, closer: human.publicKey })], [human]);
+  const refund = (await connection.getBalance(human.publicKey)) - before;
+  check(
+    `the player closes their account and gets the rent back (+${refund} lamports)`,
+    !(await connection.getAccountInfo(entrants[0])) && refund > 2_000_000,
+  );
+  const r2 = decodeRound((await connection.getAccountInfo(round))!.data)!;
+  check("the round keeps its results", r2.finalized && r2.winner.equals(agent.publicKey) && r2.entrants === 2);
 
   // ---- the house runner: opens the current 15-minute round; an agent joins and trades with a stub brain.
   console.log("runner");
@@ -283,6 +338,7 @@ async function main() {
     programId,
     connection,
     hermesUrl: "",
+    pythApiKey: "",
     anthropicKey: "",
     agentModel: "stub",
     durationMs: 0,
@@ -302,7 +358,7 @@ async function main() {
   const live = await connection.getAccountInfo(roundPda(programId, house.publicKey, current));
   check("the house opens the current round", !!live && decodeRound(live.data)?.roundId === current);
 
-  const keeper = { latest: (asset: string) => PRICES[ASSETS.indexOf(asset as never)], change: () => 0.42 } as unknown as PriceKeeper;
+  const keeper = { latest: (asset: string) => PRICES[ASSETS.indexOf(asset as never)], change: () => 0.42, age: () => 5 } as unknown as PriceKeeper;
   let prompt = "";
   const brain = {
     messages: {

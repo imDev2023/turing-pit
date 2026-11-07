@@ -8,8 +8,10 @@ import {
   KIND_AGENT,
   KIND_HUMAN,
   MAX_ASSET_BPS,
+  PRICE_AGE_KEEPER,
   PERSONAS,
   ROUND_SECONDS,
+  SHARD_ID,
   SIDE_BUY,
   SIDE_SELL,
   agentSystemPrompt,
@@ -214,23 +216,33 @@ function History({ rounds }: { rounds: PastRound[] }) {
   );
 }
 
+const span = (s: number) => (s < 120 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`);
+
 function Prices({ arena }: { arena: ArenaState }) {
+  // A trade fills only at a price younger than the round's limit.
+  const limit = arena.round?.maxPriceAge ?? PRICE_AGE_KEEPER;
+  const sponsored = arena.round ? arena.round.shardId !== SHARD_ID : false;
   return (
     <section className="prices" aria-label="Live prices">
       {ASSETS.map((a, i) => {
         const p = arena.prices[i];
         const age = p ? Math.max(0, arena.now - p.publishTime) : null;
+        const stale = age !== null && age > limit;
         return (
           <div key={a} className="price">
             <span className="sym">{a}</span>
             <span className="num">{p ? usd(p.price, a === "SOL" ? 2 : 0) : "No price yet"}</span>
-            <span className={`age ${age !== null && age > 30 ? "stale" : ""}`}>
-              {age === null ? "" : age > 30 ? `Stale, ${age}s old` : `Updated ${age}s ago`}
+            <span className={`age ${stale ? "stale" : ""}`}>
+              {age === null ? "" : stale ? `Stale, ${span(age)} old` : `Updated ${span(age)} ago`}
             </span>
           </div>
         );
       })}
-      <span className="src">Pyth prices, posted to devnet by the house keeper</span>
+      <span className="src">
+        {sponsored
+          ? "Pyth's own devnet prices, updated about every 5 minutes"
+          : "Pyth prices, posted to devnet by the house every few seconds"}
+      </span>
     </section>
   );
 }
@@ -424,7 +436,16 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
     const reason = why.trim().slice(0, 200) || "No reason given";
     const tx = new Transaction().add(
       memoIx(reason),
-      tradeIx({ programId: PROGRAM_ID, round: arena.roundAddress, player: publicKey, asset, side, usd: value, reasonHash: reasonHash(reason) }),
+      tradeIx({
+        programId: PROGRAM_ID,
+        round: arena.roundAddress,
+        player: publicKey,
+        asset,
+        side,
+        usd: value,
+        reasonHash: reasonHash(reason),
+        shardId: arena.round?.shardId,
+      }),
     );
     const sold = side === SIDE_SELL && value >= held ? `Sold all your ${asset}` : `Sold ${usd(value, 0)} of ${asset}`;
     send(tx, side === SIDE_BUY ? `Bought ${usd(value, 0)} of ${asset}` : sold);

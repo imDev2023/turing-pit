@@ -25,14 +25,14 @@ async function main() {
   if (balance < 0.2) log("main", "the house wallet is low; price updates and new rounds will fail until it is funded");
 
   const keeper = new PriceKeeper(cfg);
-  const rounds = new RoundManager(cfg);
+  const rounds = new RoundManager(cfg, keeper);
   const agents = makeAgents(cfg, keeper);
 
-  await Promise.all([
-    keeper.run(until),
-    rounds.run(until),
-    ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000)),
-  ]);
+  const keeping = keeper.run(until);
+  // With a Pyth API key, give the keeper a moment to post, so new rounds use its fresh prices.
+  await keeper.ready(45_000);
+  log("main", keeper.posting ? "the keeper is posting fresh Pyth prices" : "rounds will use Pyth's sponsored devnet feeds");
+  await Promise.all([keeping, rounds.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
   log("main", "done");
 }
 
