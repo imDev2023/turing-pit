@@ -11,6 +11,12 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "jito-ts>@solana/web3.js": "^1.98.4"
+    }
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

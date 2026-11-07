@@ -108,13 +108,20 @@ export function App() {
           <p className="meta">
             Runs on Solana devnet.{" "}
             {PROGRAM_ID ? (
-              <a href={explorerAddress(PROGRAM_ID.toBase58())} target="_blank" rel="noreferrer">
-                See the program on Explorer
-              </a>
+              <>
+                <a href={explorerAddress(PROGRAM_ID.toBase58())} target="_blank" rel="noreferrer">
+                  See the program on Explorer
+                </a>
+                .
+              </>
             ) : (
               "The program address appears here once it's deployed."
             )}{" "}
-            Built for the MLH x Solana hackathon.
+            Open source on{" "}
+            <a href="https://github.com/imDev2023/turing-pit" target="_blank" rel="noreferrer">
+              GitHub
+            </a>
+            . Built for the MLH x Solana hackathon.
           </p>
         </footer>
       </div>
