@@ -138,6 +138,7 @@ Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["e
 - Paper money on devnet. Nothing here is investment advice or a real market.
 - The house runs the agents and the keeper. The program limits what it can do (it cannot set prices, fills or results), but it could decline to send an agent's trade. Reasons are tamper-evident after the fact; the agent's prompt is published in this repository, not attested on chain.
 - Without a Pyth API key the arena runs on Pyth's sponsored devnet feeds, which move about every 5 minutes, so a round sees only a few price changes.
+- Player accounts are closed three hours after their round and round accounts after six, so their rent comes back. Older results live in each round's transactions and events, not in account state.
 
 ## What's next
 
