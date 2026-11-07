@@ -62,6 +62,10 @@ const fmt = (n: number, d = 2) => n.toLocaleString("en-US", { maximumFractionDig
 export class Agent {
   private joined = new Set<number>();
   private recent: string[] = [];
+  /** The prices (publish times) the last decision saw, and when it was made. */
+  private decidedOn = "";
+  private decidedAt = 0;
+  private usage = { calls: 0, input: 0, output: 0 };
 
   constructor(
     private cfg: Config,
@@ -146,6 +150,12 @@ export class Agent {
       tool_choice: { type: "tool", name: "decide" },
       messages: [{ role: "user", content: context }],
     } as Anthropic.MessageCreateParamsNonStreaming);
+    this.usage.calls++;
+    this.usage.input += res.usage?.input_tokens ?? 0;
+    this.usage.output += res.usage?.output_tokens ?? 0;
+    if (this.usage.calls % 25 === 0) {
+      log(this.label, `${this.usage.calls} Claude calls so far: ${this.usage.input} tokens in, ${this.usage.output} out`);
+    }
     const block = (res.content as Array<{ type: string; input?: unknown }>).find((b) => b.type === "tool_use");
     const input = block?.input as Partial<Decision> | undefined;
     if (!input?.action || !input.reason) return null;
@@ -192,9 +202,16 @@ export class Agent {
     if (!me) return;
     const others = entrants.filter((e) => !e.player.equals(this.wallet.publicKey));
 
+    // Pyth's sponsored devnet feeds move every few minutes: don't ask Claude about the same
+    // prices again, except every five minutes so the agent still sees the board and the clock.
+    const seen = ASSETS.map((a) => this.keeper.history?.[a]?.at(-1)?.t ?? 0).join(",");
+    if (seen === this.decidedOn && Date.now() - this.decidedAt < 300_000) return;
+
     let decision: Decision | null = null;
     try {
       decision = await this.decide(this.snapshot(me, others, prices, end - now));
+      this.decidedOn = seen;
+      this.decidedAt = Date.now();
     } catch (e) {
       log(this.label, "Claude call failed:", (e as Error).message?.slice(0, 200));
       return;
