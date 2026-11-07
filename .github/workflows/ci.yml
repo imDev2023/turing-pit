@@ -40,6 +40,34 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile 2>&1 | tail -20 | tee ci-out/install.log
 
+      - name: House keys
+        id: keys
+        env:
+          PIT_SEED: ${{ secrets.PIT_SEED }}
+        run: |
+          if [ -z "$PIT_SEED" ]; then
+            echo "PIT_SEED is not set, so nothing is deployed. Add it under Settings > Secrets and variables > Actions." | tee ci-out/notice.txt
+            echo "has_seed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" > ci-out/addresses.json
+          echo "has_seed=true" >> "$GITHUB_OUTPUT"
+          echo "PROGRAM_ID=$(node -p 'require("./ci-out/addresses.json").programId')" >> "$GITHUB_ENV"
+          echo "AUTHORITY=$(node -p 'require("./ci-out/addresses.json").authority')" >> "$GITHUB_ENV"
+
+      - name: Publish the house address
+        if: steps.keys.outputs.has_seed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "commit: $GITHUB_SHA"
+            echo "state: building and testing (deploy follows in a few minutes)"
+            echo "house: $AUTHORITY"
+            echo "program: $PROGRAM_ID"
+          } > ci-out/status.txt
+          scripts/publish-branch.sh ci-build ci-out || true
+
       - name: Typecheck
         run: set -o pipefail && pnpm -r typecheck 2>&1 | tee ci-out/typecheck.log
 
@@ -75,21 +103,6 @@ jobs:
 
       - name: End-to-end test on a local validator
         run: set -o pipefail && scripts/local-e2e.sh 2>&1 | grep -v "^\s*\(Compiling\|Downloaded\|Downloading\)" | tee ci-out/e2e.log
-
-      - name: House keys
-        id: keys
-        env:
-          PIT_SEED: ${{ secrets.PIT_SEED }}
-        run: |
-          if [ -z "$PIT_SEED" ]; then
-            echo "PIT_SEED is not set, so nothing is deployed. Add it under Settings > Secrets and variables > Actions." | tee ci-out/notice.txt
-            echo "has_seed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          scripts/house-keys.sh --write "$HOME/.config/solana/id.json" "$RUNNER_TEMP/program-keypair.json" > ci-out/addresses.json
-          echo "has_seed=true" >> "$GITHUB_OUTPUT"
-          echo "PROGRAM_ID=$(node -p 'require("./ci-out/addresses.json").programId')" >> "$GITHUB_ENV"
-          echo "AUTHORITY=$(node -p 'require("./ci-out/addresses.json").authority')" >> "$GITHUB_ENV"
 
       - name: Build the program for devnet
         if: steps.keys.outputs.has_seed == 'true'
