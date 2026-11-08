@@ -32,6 +32,7 @@ import { log, sleep, type Config } from "./config.js";
 import { READ, lastHour, median, type Exchange, type Mids } from "./exchanges.js";
 import { land } from "./rpc.js";
 import { ownSignatures, rememberOwn, shortError } from "./send.js";
+import { switches } from "./switches.js";
 
 export interface PricePoint {
   t: number; // unix seconds
@@ -337,7 +338,8 @@ export class PriceKeeper {
       const started = Date.now();
       await this.readExchanges();
       await this.checkWake();
-      if (this.awake) await this.postFeed();
+      // Switched off (arena.json), the house posts prices only inside its settlements.
+      if (this.awake && switches.house === "on") await this.postFeed();
       if (Date.now() - this.lastHeartbeat > 600_000) this.heartbeat();
       await sleep(Math.max(250, this.cfg.feedIntervalMs - (Date.now() - started)));
     }

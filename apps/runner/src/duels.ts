@@ -38,6 +38,7 @@ import { log, sleep, type Config } from "./config.js";
 import type { PriceKeeper } from "./keeper.js";
 import { fetchEntrants } from "./rounds.js";
 import { sendIxs, shortError } from "./send.js";
+import { switches } from "./switches.js";
 
 type Style = (typeof DUEL_STYLES)[number];
 
@@ -185,6 +186,8 @@ export class DuelManager {
       return;
     }
     if (!human) return;
+    // Switched off (arena.json): duels that already ran are still decided above, but agents don't play.
+    if (switches.house === "off" || switches.agents === "off") return;
     if (!mine) {
       if (now > round.endTs - 60) return;
       await sendIxs(

@@ -10,6 +10,7 @@ import { DuelManager } from "./duels.js";
 import { loadConfig, log } from "./config.js";
 import { PriceKeeper } from "./keeper.js";
 import { RoundManager } from "./rounds.js";
+import { watchSwitches } from "./switches.js";
 
 async function main() {
   const cfg = loadConfig();
@@ -32,12 +33,13 @@ async function main() {
   const agents = makeAgents(cfg, keeper);
   const duels = new DuelManager(cfg, keeper);
 
+  const switching = watchSwitches(until);
   const keeping = keeper.run(until);
   // Give the exchanges a moment to answer, so new rounds start on the house's prices.
   await keeper.ready(30_000);
   const { shardId } = keeper.source();
   log("main", `new rounds fill at ${shardId === HOUSE_SHARD ? "the house's prices" : shardId === SHARD_ID ? "the keeper's Pyth updates" : "Pyth's sponsored devnet feeds"}`);
-  await Promise.all([keeping, rounds.run(until), duels.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
+  await Promise.all([switching, keeping, rounds.run(until), duels.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
   log("main", "done");
 }
 

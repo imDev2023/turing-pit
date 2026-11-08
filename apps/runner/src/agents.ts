@@ -4,7 +4,7 @@
 // the trade was made with. Agents go long or short.
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { Keypair } from "@solana/web3.js";
+import type { Keypair, PublicKey } from "@solana/web3.js";
 import {
   ASSETS,
   KIND_AGENT,
@@ -31,11 +31,13 @@ import {
   type League,
   type LeagueKey,
   type Persona,
+  type Round,
 } from "@turing-pit/sdk";
 import { log, sleep, type Config } from "./config.js";
 import type { PriceKeeper } from "./keeper.js";
 import { fetchEntrants, fetchRound } from "./rounds.js";
 import { sendIxs, shortError } from "./send.js";
+import { switches } from "./switches.js";
 
 export { PERSONAS };
 
@@ -114,6 +116,30 @@ async function dayStats(): Promise<typeof market.stats> {
   return market.stats;
 }
 
+/** The house's own agents, by address. */
+let agentKeys: Set<string> | null = null;
+function houseAgents(cfg: Config): Set<string> {
+  agentKeys ??= new Set(cfg.keys.agents.map((k) => k.publicKey.toBase58()));
+  return agentKeys;
+}
+
+/** A round and its players, shared by the three agents for twenty seconds so they don't each ask the chain. */
+const rosters = new Map<number, { at: number; seen: { found: { address: PublicKey; round: Round }; entrants: Entrant[] } | null }>();
+async function rosterOf(cfg: Config, roundId: number) {
+  const cached = rosters.get(roundId);
+  if (cached && Date.now() - cached.at < 20_000) return cached.seen;
+  const found = await fetchRound(cfg, roundId);
+  const seen = found ? { found, entrants: (await fetchEntrants(cfg, found.address)).map((e) => e.entrant) } : null;
+  rosters.set(roundId, { at: Date.now(), seen });
+  if (rosters.size > 50) rosters.delete(rosters.keys().next().value!);
+  return seen;
+}
+
+/** Forgets every cached roster (tests use it to see a join at once). */
+export function forgetRosters() {
+  rosters.clear();
+}
+
 export class Agent {
   private joined = new Set<number>();
   private recent = new Map<LeagueKey, string[]>();
@@ -158,6 +184,7 @@ export class Agent {
         [this.wallet, this.cfg.keys.authority],
       );
       this.joined.add(roundId);
+      rosters.delete(roundId);
       log(this.label, `joined round ${roundId} (${leagueOf(roundId).label})`);
     } catch (e) {
       log(this.label, `join failed for round ${roundId}:`, shortError(e));
@@ -273,20 +300,30 @@ export class Agent {
 
   /** One look at a league: join its round (and the next one as it nears), then decide if due. */
   private async play(league: League, now: number) {
+    if (switches.house === "off" || switches.agents === "off") return;
+    const always = switches.agents === "always";
     const roundId = roundIdAt(now, league.key);
     const { start, end, next } = roundTimes(roundId);
-    await this.ensureJoined(roundId);
-    if (league.key !== "open" && now >= next - 240) await this.ensureJoined(roundId + 1);
+    if (always) {
+      await this.ensureJoined(roundId);
+      if (league.key !== "open" && now >= next - 240) await this.ensureJoined(roundId + 1);
+    }
     if (now < start + 5 || now > end - 15) return;
     if (Date.now() - (this.decidedAt.get(league.key) ?? 0) < CADENCE_MS[league.key]) return;
 
     const prices = ASSETS.map((a) => this.keeper.latest(a)) as [number, number, number];
     if (prices.some((p) => p === undefined)) return;
-    const found = await fetchRound(this.cfg, roundId);
-    if (!found) return;
-    const entrants = (await fetchEntrants(this.cfg, found.address)).map((e) => e.entrant);
+    const seen = await rosterOf(this.cfg, roundId);
+    if (!seen) return;
+    const { found } = seen;
+    const entrants = seen.entrants;
+    // Until launch, the agents play only in rounds a human or another outside player has joined.
+    if (!always && !entrants.some((e) => !houseAgents(this.cfg).has(e.player.toBase58()))) return;
     const me = entrants.find((e) => e.player.equals(this.wallet.publicKey));
-    if (!me) return;
+    if (!me) {
+      await this.ensureJoined(roundId);
+      return; // decides on its next turn, once the join has landed
+    }
     const others = entrants.filter((e) => !e.player.equals(this.wallet.publicKey));
     const day = league.key === "sprint" || league.key === "hour" ? {} : await dayStats();
 

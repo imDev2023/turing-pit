@@ -29,6 +29,7 @@ import {
 import { log, sleep, type Config } from "./config.js";
 import type { PriceSource } from "./keeper.js";
 import { sendIxs, shortError } from "./send.js";
+import { switches } from "./switches.js";
 
 export async function fetchRound(cfg: Config, roundId: number): Promise<{ address: PublicKey; round: Round } | null> {
   const address = roundPda(cfg.programId, cfg.keys.authority.publicKey, roundId);
@@ -292,8 +293,11 @@ export class RoundManager {
         for (const league of LEAGUES) {
           const current = roundIdAt(now, league.key);
           const { end, next } = roundTimes(current);
-          if (now < end - 60) await this.ensureRound(current);
-          if (league.key !== "open" && now >= next - 180) await this.ensureRound(current + 1);
+          // Switched off (arena.json), the house opens nothing new but still finishes what ran.
+          if (switches.house === "on") {
+            if (now < end - 60) await this.ensureRound(current);
+            if (league.key !== "open" && now >= next - 180) await this.ensureRound(current + 1);
+          }
           // Settling needs fresh prices; if Pyth's feeds stall, keep retrying recent rounds
           // (two hours of sprints, the last two rounds of the longer leagues).
           const back = league.key === "sprint" ? 8 : 2;

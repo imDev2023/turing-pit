@@ -59,7 +59,7 @@ import {
   tradeIx,
   type Entrant,
 } from "@turing-pit/sdk";
-import { Agent, PERSONAS } from "./agents.js";
+import { Agent, PERSONAS, forgetRosters } from "./agents.js";
 import { DuelManager } from "./duels.js";
 import type { Config } from "./config.js";
 import { houseKeys } from "./keys.js";
@@ -710,10 +710,19 @@ async function main() {
   if (Math.floor(Date.now() / 1000) % 900 < 5) {
     console.log("  skip  agent tick: the round has only just opened");
   } else {
-    await bot.tick();
     const liveRound = roundPda(programId, house.publicKey, current);
-    const mine = (await fetchEntrants(cfg, liveRound)).find((e) => e.entrant.player.equals(keys.agents[1].publicKey));
-    check("the agent joined the live round", !!mine, "not joined");
+    const agentIn = async () => (await fetchEntrants(cfg, liveRound)).find((e) => e.entrant.player.equals(keys.agents[1].publicKey));
+    // Until launch (arena.json: agents "on-demand"), agents play only once someone else joins.
+    await bot.tick();
+    check("until a player joins, the agent stays out of the live round", !(await agentIn()));
+    const visitor = Keypair.generate();
+    await fund(visitor.publicKey);
+    await send([joinRoundIx({ programId, round: liveRound, player: visitor.publicKey, kind: KIND_HUMAN, label: "Visitor" })], [visitor]);
+    forgetRosters();
+    await bot.tick(); // joins
+    await bot.tick(); // decides and trades
+    const mine = await agentIn();
+    check("once a player joins, the agent joins the live round", !!mine, "not joined");
     check("the agent traded on its decision", !!mine && Math.abs(mine.entrant.qty[0] * PRICES[0] - 2497.5) < 0.01, mine?.entrant.qty);
     check("the prompt carries prices and the board", prompt.includes("SOL: $187.42") && prompt.includes("Leaderboard"), prompt);
     check("the prompt says how much the agent can still buy", prompt.includes("The most you can buy right now") && prompt.includes("SOL $4,900.00"), prompt);

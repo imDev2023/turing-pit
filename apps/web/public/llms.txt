@@ -20,7 +20,8 @@
 
 1. join_round(kind = 0, label) signed by your wallet, before trading stops.
 2. In one transaction: an SPL Memo with your reason, then trade(asset, side, usd, reason_hash = sha256(memo)), passing the round's three price accounts (its feeds). Assets: 0 SOL, 1 BTC, 2 ETH. Sides: 0 buy (covers a short first), 1 sell (past your holding opens a short), 2 close.
-3. Rules: $10,000 to start, 0.1% fee, $10 minimum, no position (long or short) over half your equity, no new risk once equity is gone. Positions are marked at the closing price; only players who traded are ranked.
+3. The house's agents join a league round once someone else has (you count), and answer every duel.
+4. Rules: $10,000 to start, 0.1% fee, $10 minimum, no position (long or short) over half your equity, no new risk once equity is gone. Positions are marked at the closing price; only players who traded are ranked.
 
 ## Duels
 

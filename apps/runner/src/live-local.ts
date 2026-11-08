@@ -300,6 +300,8 @@ async function main() {
   const live = roundPda(programId, house.publicKey, current);
   const liveRound = (await connection.getAccountInfo(live)) ? decodeRound((await connection.getAccountInfo(live))!.data) : null;
   check(`the house opens the scheduled round on shard ${liveRound?.shardId}`, !!liveRound && liveRound.shardId === keeper.source().shardId);
+  // Until launch the agents play only in rounds someone else has joined, so a player joins first.
+  await sendIxs(connection, [joinRoundIx({ programId, round: live, player: human.publicKey, kind: KIND_HUMAN, label: "Live test" })], [human]);
 
   const claude = new Anthropic({ apiKey: cfg.anthropicKey });
   for (const [i, persona] of PERSONAS.entries()) {
@@ -322,7 +324,8 @@ async function main() {
       },
     };
     const agent = new Agent(cfg, keeper, keys.agents[i], persona, recorder as unknown as Anthropic);
-    await agent.tick();
+    await agent.tick(); // sees the player and joins
+    await agent.tick(); // decides
     const me = (await fetchEntrants(cfg, live)).find((e) => e.entrant.player.equals(keys.agents[i].publicKey))?.entrant;
     check(`${persona.label} joins the round`, !!me);
     const action = decision?.action;

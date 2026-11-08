@@ -125,7 +125,7 @@ New rounds and duels start on the house's prices while the exchanges answer, and
 
 ### Agents
 
-Three agents with different styles: Momentum, Contrarian and Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it) and play every league, deciding about every 2 minutes in the 15-minute league, every 10 minutes in the hourly one, hourly in the daily one, every 4 hours in the weekly one, every 12 hours in the monthly one and every 6 hours in the Open league. Each decision gets a snapshot: prices with their 1-minute, 5-minute and 1-hour change (and the 24-hour range in the long leagues), its cash and positions, how much it can still buy or sell under the cap, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell, close or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
+Three agents with different styles: Agent Momentum, Agent Contrarian and Agent Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). Until launch they play a round only once a human or another outside player has joined it (and every duel a player opens); switched to `always`, they play every league, deciding about every 2 minutes in the 15-minute league, every 10 minutes in the hourly one, hourly in the daily one, every 4 hours in the weekly one, every 12 hours in the monthly one and every 6 hours in the Open league. Each decision gets a snapshot: prices with their 1-minute, 5-minute and 1-hour change (and the 24-hour range in the long leagues), its cash and positions, how much it can still buy or sell under the cap, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell, close or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
 
 ### Units
 
@@ -154,6 +154,15 @@ scripts/local-e2e.sh                     # build, start a local validator, run t
 `scripts/local-e2e.sh` builds the program, starts `solana-test-validator` with Pyth price accounts preloaded, and checks the whole game: joins, agent registration, buys, sells, shorts and closes, the fee, the 50% cap on both sides, the $10 minimum, price age limits, fake price accounts, the house's prices (the 1% check against Pyth, a dropped price, fills, staleness, a duel opened on them), the join cutoff, week-long and ten-year rounds, moving a round's price source, settlement, finalization (only traders win), positions rebuilt from `Traded` events, duels (one trade each, early settlement and an early decision, one seat per side) and closing player accounts, then runs the house's duel manager, round manager and an agent (with a stub in place of Claude) against the live schedule of every league.
 
 `scripts/live-local.sh` checks what that test fakes. It starts a local validator with copies of Pyth's receiver, push oracle and Wormhole programs and Pyth's sponsored price accounts from devnet, trades on those accounts, runs the real keeper against Hermes when `PYTH_API_KEY` is set, and has each agent make one real Claude decision when `ANTHROPIC_API_KEY` is set. It needs network access to devnet and Hermes, and spends no devnet SOL. CI runs it on every push (`.github/workflows/live.yml`, log on the `ci-live` branch).
+
+### Switches
+
+`arena.json` at the root of the repository holds two switches, which the house reads when it starts and every two minutes after, so they take effect without a deploy:
+
+| Switch | Values |
+| --- | --- |
+| `house` | `on` opens rounds, runs the agents and answers duels; `off` opens nothing new and posts no prices for players, but still settles and closes the rounds that already ran, which hands their rent back |
+| `agents` | `on-demand` (until launch): trade only in rounds a human or another outside player has joined, and in duels; `always`: play every round; `off`: never trade |
 
 ### Deployment
 
