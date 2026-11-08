@@ -89,20 +89,20 @@ async function describe(page) {
 const OVERLAY_CSS = `
   html { scroll-behavior: auto !important; }
   #wt-cap { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); z-index: 2147483000;
-    width: max-content; max-width: min(900px, 88vw); padding: 14px 24px; border-radius: 14px;
-    background: rgba(8, 14, 36, 0.94); border: 1px solid #2b3f86; box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
-    color: #f2f4ff; font: 500 21px/1.45 "Instrument Sans Variable", system-ui, sans-serif; text-align: center;
+    width: max-content; max-width: min(900px, 88vw); padding: 12px 22px; border-radius: 12px;
+    background: rgba(15, 16, 18, 0.96); border: 1px solid #2f3137; box-shadow: 0 14px 44px rgba(0, 0, 0, 0.6);
+    color: #f3f4f5; font: 500 20px/1.45 "Instrument Sans Variable", system-ui, sans-serif; text-align: center;
     opacity: 0; transition: opacity 0.35s ease; pointer-events: none; }
   #wt-cap.on { opacity: 1; }
-  #wt-card { position: fixed; inset: 0; z-index: 2147483001; display: grid; place-content: center; gap: 20px;
-    padding: 48px; background: #0e1a3d; color: #f2f4ff; text-align: center; opacity: 0;
+  #wt-card { position: fixed; inset: 0; z-index: 2147483001; display: grid; place-content: center; gap: 18px;
+    padding: 48px; background: #08090a; color: #f3f4f5; text-align: center; opacity: 0;
     transition: opacity 0.6s ease; pointer-events: none; }
   #wt-card.on { opacity: 1; }
-  #wt-card h1 { margin: 0; font: 800 108px/0.95 "Big Shoulders Display Variable", "Arial Narrow", sans-serif; letter-spacing: 0.01em; }
-  #wt-card p { margin: 0 auto; max-width: 920px; color: #aab4dc; font: 400 27px/1.45 "Instrument Sans Variable", system-ui, sans-serif; }
-  #wt-card b { color: #f2f4ff; font-weight: 600; }
-  #wt-card .m { color: #a58bff; } #wt-card .h { color: #ffc740; }
-  .wt-spot { outline: 3px solid #a58bff !important; outline-offset: 6px; border-radius: 12px; transition: outline-color 0.3s ease; }
+  #wt-card h1 { margin: 0; font: 650 92px/1 "Instrument Sans Variable", system-ui, sans-serif; letter-spacing: -0.03em; }
+  #wt-card p { margin: 0 auto; max-width: 920px; color: #8b9099; font: 400 26px/1.45 "Instrument Sans Variable", system-ui, sans-serif; }
+  #wt-card b { color: #f3f4f5; font-weight: 600; }
+  #wt-card .m { color: #9d8cff; } #wt-card .h { color: #f2c14e; }
+  .wt-spot { outline: 2px solid #9d8cff !important; outline-offset: 4px; border-radius: 12px; transition: outline-color 0.3s ease; }
 `;
 
 async function prepare(p) {
@@ -333,6 +333,9 @@ async function walkthrough() {
   console.log("timeline", JSON.stringify(timeline));
 }
 
+// The walkthrough first, while the public RPC still answers this runner readily.
+if (video) await walkthrough();
+
 // Desktop: the first screen, the whole page and the main panels.
 const desk = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
 const page = await openArena(desk);
@@ -369,5 +372,4 @@ await phonePage.screenshot({ path: join(out, "phone-full.png"), fullPage: true }
 console.log(`phone page RPC errors: ${phonePage.rpcErrors().join(", ") || "none"}`);
 await phone.close();
 
-if (video) await walkthrough();
 await browser.close();
