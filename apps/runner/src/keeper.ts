@@ -69,8 +69,9 @@ export class PriceKeeper {
   private postsAtHeartbeat = 0;
   private lastHeartbeat = 0;
   private awakeUntil = 0;
-  /** The newest transaction seen on the house's feed. */
+  /** The newest transaction seen on the house's feed, and whether the feed has been looked at yet. */
   private lastTouch: string | undefined;
+  private looked = false;
   private feedFailures = 0;
   private blockhash: { hash: string; at: number } | null = null;
   private hermes: HermesClient | null;
@@ -230,14 +231,14 @@ export class PriceKeeper {
    *  posting for the next ten minutes. */
   private async checkWake() {
     try {
-      const first = this.lastTouch === undefined;
       const sigs = await this.cfg.connection.getSignaturesForAddress(this.feed, { limit: 20, until: this.lastTouch }, "confirmed");
+      // The first look only marks where to start: what it finds came before this shift, whose own
+      // posts it can't tell from a player's.
+      const first = !this.looked;
+      this.looked = true;
       if (!sigs.length) return;
       this.lastTouch = sigs[0].signature;
-      // On the first look, only the last two minutes count: the rest happened before this shift.
-      const since = first ? Date.now() / 1000 - 120 : 0;
-      const theirs = sigs.filter((s) => !ownSignatures.has(s.signature) && (s.blockTime ?? Infinity) >= since);
-      if (!theirs.length) return;
+      if (first || sigs.every((s) => ownSignatures.has(s.signature))) return;
       if (!this.awake) log("feed", "a player is trading; the house posts prices every 2 s until ten minutes after their last trade");
       this.awakeUntil = Date.now() + AWAKE_MS;
     } catch {
