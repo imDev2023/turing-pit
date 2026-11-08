@@ -36,7 +36,8 @@ import {
   type Round,
 } from "@turing-pit/sdk";
 import { AUTHORITY, PROGRAM_ID } from "./config";
-import { SOURCE_ACCOUNTS, bestSource, readSources } from "./sources";
+import type { Quote } from "./market";
+import { SOURCE_ACCOUNTS, bestSource, markPrices, readSources, sourceLimit } from "./sources";
 
 export interface Row {
   address: string;
@@ -108,6 +109,8 @@ export interface ArenaState {
   roundAddress: PublicKey | null;
   rows: Row[];
   prices: (PythPrice | null)[];
+  /** What positions are marked at: the round's own price while fresh, else Coinbase's live quote. */
+  marks: [number, number, number];
   thoughts: Thought[];
   tally: Tally;
   history: PastRound[];
@@ -207,13 +210,17 @@ class TxReader {
   }
 }
 
-export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaState {
+/** `quotes`: Coinbase's live prices, which mark positions while the round's own price is old. */
+export function useArena(leagueKey: LeagueKey, player: PublicKey | null, quotes: Partial<Record<Asset, Quote>> = {}): ArenaState {
   const { connection } = useConnection();
   const league = LEAGUE[leagueKey];
+  const quotesRef = useRef(quotes);
+  quotesRef.current = quotes;
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [round, setRound] = useState<Round | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [prices, setPrices] = useState<(PythPrice | null)[]>([null, null, null]);
+  const [marks, setMarks] = useState<[number, number, number]>([0, 0, 0]);
   const [priceShard, setPriceShard] = useState(SHARD_ID);
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [tally, setTally] = useState<Tally>({ ai: 0, human: 0, rounds: 0 });
@@ -303,7 +310,7 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
           const own = await connection.getMultipleAccountsInfo(r.feeds);
           p = own.map((f) => (f ? decodePriceUpdate(f.data) : null));
         }
-        const live = p.map((x) => x?.price ?? 0) as [number, number, number];
+        const live = markPrices(p, quotesRef.current, r?.maxPriceAge ?? sourceLimit(shard), Date.now() / 1000);
         let list: Row[] = [];
         if (r) {
           const accounts = await connection.getProgramAccounts(PROGRAM_ID!, {
@@ -326,6 +333,7 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
         if (cancelled) return;
         setRound(r);
         setPrices(p);
+        setMarks(live);
         setPriceShard(shard);
         setRows(list);
         setError(null);
@@ -597,6 +605,7 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
     roundAddress,
     rows,
     prices,
+    marks,
     thoughts,
     tally,
     history,

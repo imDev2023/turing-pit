@@ -18,9 +18,10 @@ export function loadConfig() {
     // Paced, with 429s handled in politeFetch rather than by web3.js retrying each on its own.
     connection: new Connection(rpcUrl, { commitment: "confirmed", fetch: politeFetch(), disableRetryOnRateLimit: true }),
     hermesUrl: env("HERMES_URL", "https://hermes.pyth.network"),
-    /** Hermes needs a Pyth API key. Without one the house can't post its own Pyth updates, and
-     *  the 1% check and the fallback read Pyth's sponsored devnet feeds instead. */
+    /** Hermes needs a Pyth API key. The house posts its own Pyth updates only with PYTH_PUSH=1 (they
+     *  cost SOL around the clock); otherwise the 1% check reads Pyth's sponsored devnet feeds. */
     pythApiKey: process.env.PYTH_API_KEY ?? "",
+    pythPush: process.env.PYTH_PUSH === "1",
     anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
     agentModel: env("AGENT_MODEL", "claude-haiku-5-5"),
     /** How long this run lasts before exiting, so the next house shift can take over cleanly. */

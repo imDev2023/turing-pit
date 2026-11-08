@@ -20,7 +20,7 @@ import {
   getGuardianSetPda,
   getTreasuryPda,
 } from "@pythnetwork/pyth-solana-receiver/address";
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction, type TransactionInstruction } from "@solana/web3.js";
 import {
   ASSETS,
   FEED_IDS,
@@ -201,6 +201,7 @@ async function main() {
     durationMs: 0,
     keeperIntervalMs: 5_000,
     feedIntervalMs: 2_000,
+    pythPush: true,
     agentIntervalMs: 0,
     pythTreasuryId: TREASURY_ID,
   } satisfies Config;
@@ -219,12 +220,24 @@ async function main() {
   }
   await tradeOn(programId, house, human, SPONSORED_SHARD_ID, PRICE_AGE_SPONSORED);
 
-  console.log("house prices (the exchanges' median -> the house's feed)");
+  console.log("house prices (the exchanges' median, posted when a game needs it)");
   {
-    const landed = await waitFor(async () => (keeper.feeding ? true : null), 90_000);
-    check(`the keeper's posts land (${keeper.feedPosts} sent)`, !!landed, "the feed did not move");
-    const info = await connection.getAccountInfo(houseFeedPda(programId, house.publicKey));
-    const feed = info ? decodeHouseFeed(info.data) : null;
+    const feedAddress = houseFeedPda(programId, house.publicKey);
+    const reading = await waitFor(async () => (keeper.pricing ? true : null), 30_000);
+    check("the keeper reads every coin's price from the exchanges", !!reading);
+    await sleep(6_000);
+    check("and posts nothing while nobody plays", !(await connection.getAccountInfo(feedAddress)));
+    // A player's transaction on the feed account wakes it, as the site's is when a trade finds the price
+    // stale. Sent directly: sendIxs marks what it sends as the house's own.
+    await sendAndConfirmTransaction(connection, new Transaction().add(SystemProgram.transfer({ fromPubkey: human.publicKey, toPubkey: feedAddress, lamports: 0 })), [human], {
+      commitment: "confirmed",
+    });
+    const feed = await waitFor(async () => {
+      const info = await connection.getAccountInfo(feedAddress);
+      const f = info ? decodeHouseFeed(info.data) : null;
+      return f && f.posts > 0 ? f : null;
+    }, 30_000);
+    check(`a player's transaction wakes it, and the house posts (${keeper.feedPosts} sent)`, !!feed, "no post landed");
     check(
       `each price is a median of several exchanges: ${ASSETS.map((a, i) => `${a} $${feed?.prices[i]} from ${feed?.sources[i]}`).join(", ")}`,
       !!feed && feed.sources.every((n) => n >= 2),

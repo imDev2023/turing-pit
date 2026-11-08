@@ -317,9 +317,12 @@ export class Agent {
       return;
     }
     try {
+      // On the house's prices, the trade carries its own fresh price, posted (and signed) by the house.
+      const post = this.keeper.priceIxs?.(found.round) ?? [];
       const sig = await sendIxs(
         this.cfg.connection,
         [
+          ...post,
           memoIx(decision.reason),
           tradeIx({
             programId: this.cfg.programId,
@@ -332,7 +335,7 @@ export class Agent {
             feeds: found.round.feeds,
           }),
         ],
-        [this.wallet],
+        post.length ? [this.wallet, this.cfg.keys.authority] : [this.wallet],
       );
       log(this.label, where, `${describe(order)}: ${decision.reason}`, sig);
     } catch (e) {

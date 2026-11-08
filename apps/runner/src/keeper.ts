@@ -1,16 +1,17 @@
 // Prices for the house. Every couple of seconds it reads the mid prices of Binance, Coinbase, OKX
-// and Hyperliquid and posts their median to its own price feed on chain, where the program keeps
-// a price only within 1% of a fresh Pyth price; rounds fill at those prices. Pyth is the check
-// and the fallback. With a Pyth API key the keeper also posts Wormhole-signed updates from Hermes
-// into its own shard of push-oracle accounts every few seconds (verified on chain, so the house
-// chooses only when to post, never the price); without one, the check reads Pyth's sponsored
-// devnet feeds on shard 0, which Pyth updates about every five minutes. New rounds use the
-// freshest source that is working. The keeper also keeps a short price history for the agents.
+// and Hyperliquid, which costs nothing, and it puts their median on chain only when a game needs
+// a price: first in each of its agents' trades and its settlements, so those carry their own
+// fresh price, and every couple of seconds while a player is trading (any player's transaction
+// on the house's feed account keeps it posting for ten minutes; the site sends a tiny one when a
+// trade finds the price stale). The program keeps a posted price only within 1% of a Pyth price,
+// read from Pyth's sponsored devnet feeds, which Pyth pays for. With PYTH_PUSH=1 and a Pyth API
+// key the keeper also posts Hermes updates into its own shard of Pyth accounts every few seconds.
+// The keeper also keeps a short price history for the agents.
 
 import { Wallet } from "@coral-xyz/anchor";
 import { HermesClient } from "@pythnetwork/hermes-client";
 import { PythSolanaReceiver } from "@pythnetwork/pyth-solana-receiver";
-import { ComputeBudgetProgram, Transaction } from "@solana/web3.js";
+import { ComputeBudgetProgram, Transaction, type PublicKey, type TransactionInstruction } from "@solana/web3.js";
 import {
   ASSETS,
   EXCHANGES,
@@ -21,7 +22,6 @@ import {
   PRICE_AGE_SPONSORED,
   SHARD_ID,
   SPONSORED_SHARD_ID,
-  decodeHouseFeed,
   decodePriceUpdate,
   feedAccounts,
   houseFeedPda,
@@ -31,7 +31,7 @@ import {
 import { log, sleep, type Config } from "./config.js";
 import { READ, lastHour, median, type Exchange, type Mids } from "./exchanges.js";
 import { land } from "./rpc.js";
-import { shortError } from "./send.js";
+import { ownSignatures, rememberOwn, shortError } from "./send.js";
 
 export interface PricePoint {
   t: number; // unix seconds
@@ -46,8 +46,10 @@ export interface PriceSource {
 
 /** An exchange's quote counts toward the median for this long after it arrives. */
 const QUOTE_TTL_MS = 10_000;
-/** Compute for one post of the house's prices; a post uses about a third of it. */
+/** Compute for one post of the house's prices on its own; a post uses about a third of it. */
 const FEED_CU = 40_000;
+/** A player's transaction on the house's feed keeps the house posting for this long. */
+const AWAKE_MS = 10 * 60_000;
 
 export class PriceKeeper {
   /** Prices at least ten seconds apart, for the agents' 1-minute to 1-hour moves. */
@@ -56,17 +58,19 @@ export class PriceKeeper {
   posted = 0;
   lastPostedAt = 0;
   lastError = "";
-  /** Posts of the house's prices sent since start. */
+  /** Posts of the house's prices sent on their own (those inside trades and settlements aside). */
   feedPosts = 0;
+  private readonly feed: PublicKey;
   private live: Partial<Record<Asset, PricePoint>> = {};
-  private medianAt: Record<Asset, number> = { SOL: 0, BTC: 0, ETH: 0 };
+  private medians: Partial<Record<Asset, { price: number; sources: number; at: number }>> = {};
   private quotes = new Map<Exchange, { mids: Mids; at: number }>();
   /** Reads per exchange since the last heartbeat. */
   private health = new Map<Exchange, { ok: number; failed: number; error: string }>();
-  /** Per coin: the feed's on-chain time at the last read, and when (ms) it last moved forward. */
-  private feedTimes = [0, 0, 0];
-  private feedMovedAt = [0, 0, 0];
-  private wasFeeding = false;
+  private postsAtHeartbeat = 0;
+  private lastHeartbeat = 0;
+  private awakeUntil = 0;
+  /** The newest transaction seen on the house's feed. */
+  private lastTouch: string | undefined;
   private feedFailures = 0;
   private blockhash: { hash: string; at: number } | null = null;
   private hermes: HermesClient | null;
@@ -74,7 +78,8 @@ export class PriceKeeper {
   private failures = 0;
 
   constructor(private cfg: Config) {
-    this.hermes = cfg.pythApiKey ? new HermesClient(cfg.hermesUrl, { accessToken: cfg.pythApiKey }) : null;
+    this.feed = houseFeedPda(cfg.programId, cfg.keys.authority.publicKey);
+    this.hermes = cfg.pythApiKey && cfg.pythPush ? new HermesClient(cfg.hermesUrl, { accessToken: cfg.pythApiKey }) : null;
     this.receiver = new PythSolanaReceiver({
       connection: cfg.connection,
       wallet: new Wallet(cfg.keys.authority),
@@ -87,24 +92,28 @@ export class PriceKeeper {
     return this.lastPostedAt > 0 && Date.now() - this.lastPostedAt < 60_000;
   }
 
-  /** True while the house's feed moves forward on chain for every coin. */
-  get feeding(): boolean {
-    const now = Date.now();
-    return this.feedMovedAt.every((t) => now - t < 30_000);
+  /** True while every coin has a fresh median, so the house can price a trade. */
+  get pricing(): boolean {
+    return ASSETS.every((a) => Date.now() - (this.medians[a]?.at ?? 0) < QUOTE_TTL_MS);
   }
 
-  /** The price source new rounds should use: the house's feed, else the freshest Pyth. */
+  /** True while a player is trading: the house posts its prices every couple of seconds. */
+  get awake(): boolean {
+    return Date.now() < this.awakeUntil;
+  }
+
+  /** The price source new rounds should use: the house's prices, else the freshest Pyth. */
   source(): PriceSource {
-    if (this.feeding) return { shardId: HOUSE_SHARD, maxPriceAge: PRICE_AGE_HOUSE };
+    if (this.pricing) return { shardId: HOUSE_SHARD, maxPriceAge: PRICE_AGE_HOUSE };
     return this.posting
       ? { shardId: SHARD_ID, maxPriceAge: PRICE_AGE_KEEPER }
       : { shardId: SPONSORED_SHARD_ID, maxPriceAge: PRICE_AGE_SPONSORED };
   }
 
-  /** Waits (up to `ms`) for the house's prices to land, so new rounds start on them. */
+  /** Waits (up to `ms`) for the exchanges to answer, so new rounds start on the house's prices. */
   async ready(ms: number) {
     const until = Date.now() + ms;
-    while (!this.feeding && Date.now() < until) await sleep(1_000);
+    while (!this.pricing && Date.now() < until) await sleep(500);
   }
 
   latest(asset: Asset): number | undefined {
@@ -126,6 +135,33 @@ export class PriceKeeper {
     return then ? ((latest.price - then.price) / then.price) * 100 : undefined;
   }
 
+  /** For a round on the house's prices: a post of the current medians to put first in its trade
+   *  or settlement, so the transaction carries its own fresh price; the house signs it too.
+   *  Empty for rounds on Pyth's accounts, or while no exchange answers. */
+  priceIxs(round: { shardId: number }): TransactionInstruction[] {
+    if (round.shardId !== HOUSE_SHARD) return [];
+    const ix = this.postIx();
+    return ix ? [ix] : [];
+  }
+
+  /** The current medians as a post_prices instruction (0 for a coin no exchange has answered for lately). */
+  private postIx(): TransactionInstruction | null {
+    const now = Date.now();
+    const fresh = ASSETS.map((a) => {
+      const m = this.medians[a];
+      return m && now - m.at < QUOTE_TTL_MS ? m : null;
+    });
+    if (fresh.every((m) => !m)) return null;
+    return postPricesIx({
+      programId: this.cfg.programId,
+      authority: this.cfg.keys.authority.publicKey,
+      prices: fresh.map((m) => m?.price ?? 0),
+      sources: fresh.map((m) => m?.sources ?? 0),
+      // The Pyth prices the program checks each price against: the keeper's own while it posts them.
+      guards: feedAccounts(this.posting ? SHARD_ID : SPONSORED_SHARD_ID),
+    });
+  }
+
   /** Sets a coin's latest price; the history keeps points at least ten seconds apart. */
   private note(asset: Asset, point: PricePoint) {
     const live = this.live[asset];
@@ -140,7 +176,7 @@ export class PriceKeeper {
 
   /** Pyth's prices stand in for a coin while no exchange answers for it. */
   private notePyth(asset: Asset, point: PricePoint) {
-    if (Date.now() - this.medianAt[asset] > QUOTE_TTL_MS) this.note(asset, point);
+    if (Date.now() - (this.medians[asset]?.at ?? 0) > QUOTE_TTL_MS) this.note(asset, point);
   }
 
   private recordParsed(parsed: { id: string; price: { price: string; expo: number; publish_time: number } }[] | null | undefined) {
@@ -161,8 +197,8 @@ export class PriceKeeper {
     }
   }
 
-  /** Reads every exchange, then posts the median of the fresh quotes for each coin. */
-  private async postFeed() {
+  /** Reads every exchange (free) and takes the median of the fresh quotes for each coin. */
+  private async readExchanges() {
     const reads = await Promise.allSettled(EXCHANGES.map((x) => READ[x]()));
     const now = Date.now();
     reads.forEach((r, i) => {
@@ -177,45 +213,59 @@ export class PriceKeeper {
       }
       this.health.set(x, h);
     });
-    const prices = [0, 0, 0];
-    const sources = [0, 0, 0];
-    ASSETS.forEach((a, i) => {
+    for (const a of ASSETS) {
       const mids = [...this.quotes.values()]
         .filter((q) => now - q.at < QUOTE_TTL_MS)
         .map((q) => q.mids[a])
         .filter((p): p is number => p !== undefined);
       const m = median(mids);
-      if (m === undefined) return;
-      prices[i] = m;
-      sources[i] = mids.length;
-      this.medianAt[a] = now;
+      if (m === undefined) continue;
+      this.medians[a] = { price: m, sources: mids.length, at: now };
       this.note(a, { t: Math.floor(now / 1000), price: m });
-    });
-    if (prices.every((p) => p === 0)) return;
+    }
+  }
+
+  /** Looks for players' transactions on the house's feed: every trade on the house's prices reads
+   *  it, and the site sends a tiny one when a trade finds the price stale. Each keeps the house
+   *  posting for the next ten minutes. */
+  private async checkWake() {
+    try {
+      const first = this.lastTouch === undefined;
+      const sigs = await this.cfg.connection.getSignaturesForAddress(this.feed, { limit: 20, until: this.lastTouch }, "confirmed");
+      if (!sigs.length) return;
+      this.lastTouch = sigs[0].signature;
+      // On the first look, only the last two minutes count: the rest happened before this shift.
+      const since = first ? Date.now() / 1000 - 120 : 0;
+      const theirs = sigs.filter((s) => !ownSignatures.has(s.signature) && (s.blockTime ?? Infinity) >= since);
+      if (!theirs.length) return;
+      if (!this.awake) log("feed", "a player is trading; the house posts prices every 2 s until ten minutes after their last trade");
+      this.awakeUntil = Date.now() + AWAKE_MS;
+    } catch {
+      // looked at again in two seconds
+    }
+  }
+
+  /** Posts the medians on their own, while a player is trading. */
+  private async postFeed() {
+    const ix = this.postIx();
+    if (!ix) return;
     try {
       const conn = this.cfg.connection;
       const authority = this.cfg.keys.authority;
-      if (!this.blockhash || now - this.blockhash.at > 30_000) {
-        this.blockhash = { hash: (await conn.getLatestBlockhash("confirmed")).blockhash, at: now };
+      if (!this.blockhash || Date.now() - this.blockhash.at > 30_000) {
+        this.blockhash = { hash: (await conn.getLatestBlockhash("confirmed")).blockhash, at: Date.now() };
       }
       const tx = new Transaction({ feePayer: authority.publicKey, recentBlockhash: this.blockhash.hash }).add(
         // A compute limit that differs from post to post keeps two posts of the same prices apart.
         ComputeBudgetProgram.setComputeUnitLimit({ units: FEED_CU + (this.feedPosts % 500) }),
-        postPricesIx({
-          programId: this.cfg.programId,
-          authority: authority.publicKey,
-          prices,
-          sources,
-          // The Pyth prices the program checks each price against: the keeper's own while it posts them.
-          guards: feedAccounts(this.posting ? SHARD_ID : SPONSORED_SHARD_ID),
-        }),
+        ix,
       );
       tx.sign(authority);
-      // Not confirmed one by one: the next post follows in two seconds, and readFeed sees what landed.
+      rememberOwn(tx.signature!);
+      // Not confirmed one by one: the next post follows in two seconds.
       await conn.sendRawTransaction(tx.serialize(), { maxRetries: 0 });
       this.feedPosts++;
       this.feedFailures = 0;
-      if (this.feedPosts === 1 || this.feedPosts % 300 === 0) this.heartbeat();
     } catch (e) {
       this.feedFailures++;
       const msg = shortError(e);
@@ -224,7 +274,7 @@ export class PriceKeeper {
     }
   }
 
-  /** The feed in the log: the first post, then about every ten minutes, with how each exchange answered. */
+  /** The prices in the log every ten minutes, with how each exchange answered and what was posted. */
   private heartbeat() {
     const prices = ASSETS.map((a) => `${a} $${this.live[a]?.price.toFixed(2) ?? "?"}`).join(", ");
     const exchanges = EXCHANGES.map((x) => {
@@ -232,27 +282,11 @@ export class PriceKeeper {
       if (!h) return `${x} 0/0`;
       return `${x} ${h.ok}/${h.ok + h.failed}${h.failed ? ` (${h.error})` : ""}`;
     }).join(", ");
-    log("feed", `post ${this.feedPosts} (${prices}); exchanges answered ${exchanges}`);
+    const posts = this.feedPosts - this.postsAtHeartbeat;
+    log("feed", `${prices}; exchanges answered ${exchanges}; ${posts ? `${posts} posts while players traded` : "no player traded, so nothing posted on its own"}`);
     this.health.clear();
-  }
-
-  /** Reads the house's feed back from the chain, to see that its prices keep landing. */
-  private async readFeed() {
-    try {
-      const info = await this.cfg.connection.getAccountInfo(houseFeedPda(this.cfg.programId, this.cfg.keys.authority.publicKey));
-      const feed = info ? decodeHouseFeed(info.data) : null;
-      feed?.times.forEach((t, i) => {
-        if (t <= this.feedTimes[i]) return;
-        if (this.feedTimes[i] > 0) this.feedMovedAt[i] = Date.now();
-        this.feedTimes[i] = t;
-      });
-    } catch {
-      // the next read tries again
-    }
-    if (this.feeding !== this.wasFeeding) {
-      this.wasFeeding = this.feeding;
-      log("feed", this.feeding ? "the house's prices are landing; new rounds fill at them" : "the house's prices stopped landing; new rounds fill at Pyth's");
-    }
+    this.postsAtHeartbeat = this.feedPosts;
+    this.lastHeartbeat = Date.now();
   }
 
   private async post(hermes: HermesClient, ids: string[]) {
@@ -298,10 +332,12 @@ export class PriceKeeper {
   }
 
   private async runFeed(until: number) {
-    for (let n = 0; Date.now() < until; n++) {
+    while (Date.now() < until) {
       const started = Date.now();
-      await this.postFeed();
-      if (n % 3 === 0) await this.readFeed();
+      await this.readExchanges();
+      await this.checkWake();
+      if (this.awake) await this.postFeed();
+      if (Date.now() - this.lastHeartbeat > 600_000) this.heartbeat();
       await sleep(Math.max(250, this.cfg.feedIntervalMs - (Date.now() - started)));
     }
   }
@@ -309,7 +345,7 @@ export class PriceKeeper {
   private async runPyth(until: number) {
     const ids = ASSETS.map((a) => FEED_IDS[a]);
     const hermes = this.hermes;
-    if (!hermes) log("keeper", "PYTH_API_KEY is not set, so the 1% check reads Pyth's sponsored devnet feeds (updated about every 5 minutes)");
+    if (!hermes) log("keeper", "the 1% check reads Pyth's sponsored devnet feeds; the house posts no Pyth updates of its own");
     while (Date.now() < until) {
       const started = Date.now();
       if (hermes) await this.post(hermes, ids);

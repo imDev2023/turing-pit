@@ -28,7 +28,9 @@ import {
 import { AUTHORITY, PROGRAM_ID, explorerTx } from "./config";
 import { countdown, pct, price, savedName, usd } from "./format";
 import { Faucet } from "./League";
+import type { Quote } from "./market";
 import type { Sender } from "./send";
+import { markPrices } from "./sources";
 import type { Duel, DuelsState } from "./useDuels";
 
 const MAX = 9_900;
@@ -42,7 +44,7 @@ function side(e: Entrant | undefined, prices: number[]) {
   return { trade: t, closed: e.settled || e.trades >= 2, opened: e.trades > 0, ret: (equity / 10_000 - 1) * 100 };
 }
 
-export function DuelsView({ state, sender, now }: { state: DuelsState; sender: Sender; now: number }) {
+export function DuelsView({ state, quotes, sender, now }: { state: DuelsState; quotes: Partial<Record<Asset, Quote>>; sender: Sender; now: number }) {
   const me = sender.player;
   const mine = me ? state.duels.filter((d) => d.human?.entrant.player.equals(me)) : [];
   const others = state.duels.filter((d) => !me || !d.human?.entrant.player.equals(me)).slice(0, 12);
@@ -62,7 +64,7 @@ export function DuelsView({ state, sender, now }: { state: DuelsState; sender: S
           {!me ? <p className="empty">Connect a wallet</p> : mine.length === 0 ? <p className="empty">None yet</p> : null}
           <ol className="duel-list">
             {mine.map((d) => (
-              <DuelCard key={d.address.toBase58()} duel={d} state={state} sender={sender} now={now} mine />
+              <DuelCard key={d.address.toBase58()} duel={d} state={state} quotes={quotes} sender={sender} now={now} mine />
             ))}
           </ol>
         </section>
@@ -73,7 +75,7 @@ export function DuelsView({ state, sender, now }: { state: DuelsState; sender: S
             </header>
             <ol className="duel-list">
               {others.map((d) => (
-                <DuelCard key={d.address.toBase58()} duel={d} state={state} sender={sender} now={now} />
+                <DuelCard key={d.address.toBase58()} duel={d} state={state} quotes={quotes} sender={sender} now={now} />
               ))}
             </ol>
           </section>
@@ -194,9 +196,23 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
   );
 }
 
-function DuelCard({ duel, state, sender, now, mine = false }: { duel: Duel; state: DuelsState; sender: Sender; now: number; mine?: boolean }) {
+function DuelCard({
+  duel,
+  state,
+  quotes,
+  sender,
+  now,
+  mine = false,
+}: {
+  duel: Duel;
+  state: DuelsState;
+  quotes: Partial<Record<Asset, Quote>>;
+  sender: Sender;
+  now: number;
+  mine?: boolean;
+}) {
   const { round } = duel;
-  const prices = (state.prices[round.shardId] ?? []).map((p) => p?.price ?? 0);
+  const prices = markPrices(state.prices[round.shardId] ?? [null, null, null], quotes, round.maxPriceAge, now);
   const style = DUEL_STYLES[duelStyle(round.roundId)];
   const agentName = duel.agent?.entrant.label ?? PERSONAS[duelAgent(round.roundId)]?.label ?? "Agent";
   const humanName = mine ? "You" : (duel.human?.entrant.label ?? "Player");

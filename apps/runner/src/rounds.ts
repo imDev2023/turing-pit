@@ -1,7 +1,7 @@
 // Opens a round every 15 minutes, then settles every entrant and names the winner once it ends.
 // Later it closes the players' accounts and then the round's own, so their rent comes back.
 
-import { LAMPORTS_PER_SOL, PublicKey, SystemProgram } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, type TransactionInstruction } from "@solana/web3.js";
 import {
   CLOSE_DELAY_SECONDS,
   ENTRANT_SIZE,
@@ -62,10 +62,13 @@ export class RoundManager {
     log("rounds", ...args);
   }
 
-  /** `prices` picks each new round's price feeds; by default the keeper's own shard. */
+  /** `prices` picks each new round's price source (by default the keeper's own Pyth shard) and,
+   *  for a round on the house's prices, posts a fresh price in the transaction that settles it. */
   constructor(
     private cfg: Config,
-    private prices: { source(): PriceSource } = { source: () => ({ shardId: SHARD_ID, maxPriceAge: PRICE_AGE_KEEPER }) },
+    private prices: { source(): PriceSource; priceIxs?(round: Round): TransactionInstruction[] } = {
+      source: () => ({ shardId: SHARD_ID, maxPriceAge: PRICE_AGE_KEEPER }),
+    },
   ) {}
 
   private async ensureRound(roundId: number) {
@@ -112,9 +115,13 @@ export class RoundManager {
       try {
         await sendIxs(
           this.cfg.connection,
-          batch.map((e) =>
-            settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address, feeds: found.round.feeds }),
-          ),
+          [
+            // Open positions are marked at the price posted here.
+            ...(this.prices.priceIxs?.(found.round) ?? []),
+            ...batch.map((e) =>
+              settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address, feeds: found.round.feeds }),
+            ),
+          ],
           [this.cfg.keys.authority],
           { computeUnits: 400_000 },
         );

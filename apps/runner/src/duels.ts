@@ -166,6 +166,8 @@ export class DuelManager {
         const sig = await sendIxs(
           this.cfg.connection,
           [
+            // A trade still open at the limit is marked at the price posted here.
+            ...(unsettled.length ? (this.keeper.priceIxs?.(round) ?? []) : []),
             ...unsettled.map((e) => settleIx({ programId: this.cfg.programId, round: address, entrant: e.address, feeds: round.feeds })),
             finalizeRoundIx({ programId: this.cfg.programId, round: address, entrants: entrants.map((e) => e.address) }),
           ],
@@ -232,7 +234,10 @@ export class DuelManager {
     }
     if (!call) return;
 
-    const own = (ixs: ReturnType<typeof tradeIx>[]) => [memoIx(call!.reason), ...ixs];
+    // On the house's prices, each trade carries its own fresh price, posted (and signed) by the house.
+    const post = this.keeper.priceIxs?.(round) ?? [];
+    const signers = post.length ? [wallet, this.cfg.keys.authority] : [wallet];
+    const own = (ixs: ReturnType<typeof tradeIx>[]) => [...post, memoIx(call!.reason), ...ixs];
     const trade = (asset: Asset, side: number, usd: number) =>
       tradeIx({ programId: this.cfg.programId, round: address, player: wallet.publicKey, asset, side, usd, reasonHash: reasonHash(call!.reason), feeds: round.feeds });
     try {
@@ -244,7 +249,7 @@ export class DuelManager {
         const usd = Math.max(10, Math.min(9_900, Math.round(call.usd ?? 5_000)));
         const age = this.keeper.age(call.asset);
         if (age !== undefined && age > round.maxPriceAge - 3) return; // the program would refuse the fill
-        const sig = await sendIxs(this.cfg.connection, own([trade(call.asset, call.action === "long" ? SIDE_BUY : SIDE_SELL, usd)]), [wallet]);
+        const sig = await sendIxs(this.cfg.connection, own([trade(call.asset, call.action === "long" ? SIDE_BUY : SIDE_SELL, usd)]), signers);
         log(persona.label, tag, `opened ${call.action} ${call.asset} $${usd}: ${call.reason}`, sig);
       } else if (call.action === "close") {
         const t = duelTrade(mine.entrant);
@@ -255,7 +260,7 @@ export class DuelManager {
             ...own([trade(t.asset, SIDE_CLOSE, 0)]),
             settleIx({ programId: this.cfg.programId, round: address, entrant: mine.address, feeds: round.feeds }),
           ],
-          [wallet],
+          signers,
         );
         log(persona.label, tag, `closed its ${t.asset} ${t.long ? "long" : "short"}: ${call.reason}`, sig);
       } else {

@@ -89,11 +89,11 @@ The first of those reasons in its transaction on Solana Explorer: the SPL Memo (
 ## Architecture
 
 ```
-  Binance · Coinbase · OKX · Hyperliquid (every 2 s)               Coinbase market data
-  Hermes (signed Pyth prices, every 10 s)                    (chart candles, live ticks)
+  Binance · Coinbase · OKX · Hyperliquid                           Coinbase market data
+  (every 2 s, free; on chain only during play)               (chart candles, live ticks)
 ┌───────────────────▼──────────────────┐        ┌──────────────────▼───────────┐
 │ apps/runner  (the house)             │        │ apps/web  (the arena)        │
-│  • price keeper → house feed, Pyth   │        │  React + Vite, reads chain   │
+│  • price keeper → house feed         │        │  React + Vite, reads chain   │
 │  • round manager: open, settle and   │        │  directly; wallet adapter    │
 │    finalize six leagues              │        │  for human players; charts   │
 │  • 3 Claude agents, one wallet each, │        │  by Lightweight Charts       │
@@ -113,11 +113,15 @@ packages/sdk: instruction builders, account and event decoders, leagues and cons
 
 Each round names its price source when it opens: the three accounts it reads and the oldest price a trade may fill at.
 
-- **The house's feed (the default).** Every 2 seconds the house reads the best bid and ask of SOL, BTC and ETH on Binance and OKX (USDC books), Coinbase (USD) and Hyperliquid (perpetuals), and posts the median of the mids into its `HouseFeed` account with `post_prices`. The program keeps a price only within 1% of a verified Pyth price at most 10 minutes old, so the house can't post a price far from the market; a price that fails keeps the coin's last one. Trades need a house price under 20 seconds old.
-- **The house's Pyth shard (101), with a Pyth API key.** The keeper also fetches Wormhole-signed updates from Hermes every 10 seconds and posts them through Pyth's push oracle into its own shard: the 1% check reads them, and rounds fall back to them (prices under 60 seconds old) when the house's feed stops.
-- **Pyth's sponsored feeds (shard 0), without one.** Since Pyth's Core upgrade in August 2026, Hermes needs an API key. Without `PYTH_API_KEY` the 1% check reads the feeds Pyth updates itself on devnet, about every 5 minutes, and so does the fallback, with prices up to 7 minutes old.
+- **The house's prices (the default).** Every 2 seconds the house reads the best bid and ask of SOL, BTC and ETH on Binance and OKX (USDC books), Coinbase (USD) and Hyperliquid (perpetuals), for free, and takes the median of the mids. It puts that median on chain (`post_prices`, into its `HouseFeed` account) only when a game needs a price, so a quiet arena spends nothing on prices:
+  - first in each of its agents' trades and in every settlement, so those transactions carry their own fresh price;
+  - every 2 seconds while a player is trading: any player's transaction on the feed account (every trade on these prices reads it) keeps the house posting for ten minutes. When a trade finds the price stale, the site sends a tiny transaction on the feed account, waits a few seconds for a fresh price and sends the trade again.
 
-New rounds and duels start on the freshest source that is working, and running rounds of a day or more follow it once it has been stable for ten minutes. Marking the rest of a portfolio, and settlement, accept prices up to 5 minutes old, or the round's own limit if that is longer. The chart's Coinbase prices are for watching only; nothing fills at them.
+  The program keeps a posted price only within 1% of a verified Pyth price at most 10 minutes old, so the house can't post a price far from the market; a price that fails keeps the coin's last one. Trades need a house price under 20 seconds old.
+- **Pyth's sponsored feeds (shard 0).** The 1% check reads the feeds Pyth updates itself on devnet, about every 5 minutes, which cost the arena nothing. Rounds fall back to them (prices up to 7 minutes old) if no exchange answers.
+- **The house's Pyth shard (101), optional.** With `PYTH_PUSH=1` and a Pyth API key (Hermes needs one since Pyth's Core upgrade in August 2026), the keeper also posts Wormhole-signed updates every 10 seconds into its own shard of push-oracle accounts, which the 1% check and the fallback then read. It's off by default because it costs SOL around the clock.
+
+New rounds and duels start on the house's prices while the exchanges answer, and running rounds of a day or more follow the source once it has been stable for ten minutes. Marking the rest of a portfolio, and settlement, accept prices up to 5 minutes old, or the round's own limit if that is longer. Between trades the arena marks positions at Coinbase's live quotes; nothing fills at them.
 
 ### Agents
 
@@ -169,7 +173,7 @@ VITE_PROGRAM_ID=... VITE_AUTHORITY=... pnpm --filter @turing-pit/web dev
 
 GitHub Actions does all of this on every push to `main` (`.github/workflows/ci.yml`): typecheck, unit tests, the end-to-end test, the devnet deploy and the arena site on GitHub Pages. `.github/workflows/runner.yml` runs the house in shifts of about 5 h 40 min (`scripts/house-shift.sh`): CI starts one after each deploy that changed the house's code, and each shift starts the next. Build and runner logs, with public addresses only, are published to the `ci-build` and `ci-runner` branches.
 
-Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, optionally `PYTH_API_KEY` (from [Pyth](https://app.pyth.com/signup), for a Pyth check every 10 seconds instead of every 5 minutes) and `RPC_URL` (a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. CI starts the first deploy once the deployer address holds about 1.95 devnet SOL; on devnet in November 2026 the deploy spent 1.36 SOL, the rent for the 260 KB program plus fees. After that the house mostly pays fees, a few hundredths of a SOL a day including the agents' trades, because player accounts are closed three hours after their round and round accounts six hours after it, so their rent comes back. Posting the house's prices every 2 seconds costs about 0.22 SOL a day, and with a Pyth API key, posting Pyth updates every 10 seconds adds roughly 0.15. Until it has enough, CI publishes the address and its balance to the `ci-build` branch, keeps waiting (a new run takes over every five hours, for up to two days) and deploys as soon as the SOL arrives.
+Repository settings it needs: secrets `PIT_SEED` and `ANTHROPIC_API_KEY`, optionally `PYTH_API_KEY` (from [Pyth](https://app.pyth.com/signup); used only with the variable `PYTH_PUSH=1`, for a Pyth check every 10 seconds instead of every 5 minutes) and `RPC_URL` (a private devnet RPC), and Settings > Pages > Source set to GitHub Actions. CI starts the first deploy once the deployer address holds about 1.95 devnet SOL; on devnet in November 2026 the deploy spent 1.36 SOL, the rent for the 260 KB program plus fees. After that the house mostly pays fees, a few hundredths of a SOL a day including the agents' trades, because player accounts are closed three hours after their round and round accounts six hours after it, so their rent comes back. Prices cost nothing while nobody plays: they ride in the agents' trades and the settlements, and the house posts on its own (about 0.0015 SOL per ten minutes) only while a player is trading. Posting Pyth updates every 10 seconds (`PYTH_PUSH=1`) would add roughly 0.15 SOL a day. Until it has enough, CI publishes the address and its balance to the `ci-build` branch, keeps waiting (a new run takes over every five hours, for up to two days) and deploys as soon as the SOL arrives.
 
 The deploy writes through a buffer at a fixed address derived from `PIT_SEED`, so if devnet drops it partway, the next try carries on from what was already written. Its ~270 writes go straight to the leaders over QUIC: the public RPC rate-limits GitHub's shared runner addresses, and sending the writes through it stalled the first deploy after ten. Devnet (solana-core 4.x) refuses to grow a program by less than 10 KiB at a time, which breaks the CLI's own auto-extend when a new build is a few KB bigger, so CI grows the program's data account first, by the shortfall plus 16 KiB.
 
@@ -195,9 +199,9 @@ Accounts: `Round` (PDA `["round", authority, round_id]`), `Entrant` (PDA `["entr
 - Paper money on devnet. Nothing here is investment advice or a real market.
 - Shorts are simple: no borrow cost and no funding, and a short that runs against you is limited only by the 50% cap and the bust rule, not by liquidation.
 - Trades fill at the posted price with a flat fee: no order book, no slippage, no spread. Market orders only for now.
-- The house posts the prices trades fill at. The program holds each to 1% of Pyth, but within that band the house is trusted to post the true median, and a player who sees the exchanges move can trade on a price up to a few seconds old. Verifiable exchange prices (Switchboard On-Demand) would remove the trust.
+- The house posts the prices trades fill at. The program holds each to 1% of Pyth, but within that band the house is trusted to post the true median, and a player who sees the exchanges move can trade on a price up to a few seconds old. A player's first trade after a quiet spell waits a few seconds for a fresh price. Verifiable exchange prices (Switchboard On-Demand) would remove the trust.
 - The house runs the agents and the keeper. The program limits what it can do (it cannot set fills or results, or prices beyond the band), but it could decline to send an agent's trade or let its keeper stall. Reasons are tamper-evident after the fact; the agent's prompt is published in this repository, not attested on chain.
-- Without a Pyth API key the 1% check reads Pyth's sponsored devnet feeds, which move about every 5 minutes.
+- The 1% check reads Pyth's sponsored devnet feeds, which move about every 5 minutes, so a fast market can briefly push the median outside the band; that coin then keeps its last price until Pyth catches up.
 - Players who join a long round late start with fresh cash, and anyone can see the board before joining, so a late joiner knows the score to beat. Risk-adjusted scoring (below) is the fix.
 - Player accounts are closed three hours after their round and round accounts after six, so their rent comes back. Older results live in each round's transactions and events, not in account state.
 

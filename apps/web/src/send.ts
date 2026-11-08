@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, LAMPORTS_PER_SOL, SystemProgram, Transaction, type PublicKey, type TransactionInstruction } from "@solana/web3.js";
-import { explainError } from "@turing-pit/sdk";
+import { PIT_ERRORS, decodeHouseFeed, explainError } from "@turing-pit/sdk";
+import { HOUSE_FEED } from "./sources";
+
+/** The program's "Price is too old" (error 6014). */
+const STALE = PIT_ERRORS[14];
 
 export type Note = { ok: boolean; text: string; sig?: string };
 
@@ -68,35 +72,71 @@ export function useSender(onDone?: () => void) {
     };
   }, [connection, session]);
 
+  /** Builds, signs and lands one transaction; while the session wallet runs low, the same
+   *  transaction tops it up from the connected wallet, the one approval. */
+  const submit = async (ixs: TransactionInstruction[]): Promise<string> => {
+    if (!wallet || !session) throw new Error("Connect a wallet");
+    const [latest, held] = await Promise.all([connection.getLatestBlockhash("confirmed"), connection.getBalance(session.publicKey, "confirmed")]);
+    const fund = held < LOW;
+    const tx = new Transaction();
+    if (fund) tx.add(SystemProgram.transfer({ fromPubkey: wallet, toPubkey: session.publicKey, lamports: TOP_UP - held }));
+    tx.add(...ixs);
+    tx.feePayer = fund ? wallet : session.publicKey;
+    tx.recentBlockhash = latest.blockhash;
+    let raw: Uint8Array;
+    if (fund) {
+      if (!signTransaction) throw new Error("This wallet can't sign transactions here");
+      tx.partialSign(session);
+      // Tried first, so the wallet is never asked to approve a transaction that would fail.
+      const trial = await connection.simulateTransaction(tx);
+      if (trial.value.err) throw new Error((trial.value.logs ?? []).join("\n") || JSON.stringify(trial.value.err));
+      raw = (await signTransaction(tx)).serialize();
+    } else {
+      tx.sign(session);
+      raw = tx.serialize();
+    }
+    // Sent to devnet by the page, and again every two seconds until it lands.
+    const sig = await connection.sendRawTransaction(raw, { maxRetries: 0 });
+    const resend = setInterval(() => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined), 2000);
+    try {
+      const res = await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
+      if (res.value.err) throw new Error(JSON.stringify(res.value.err));
+    } finally {
+      clearInterval(resend);
+    }
+    return sig;
+  };
+
+  /** How many prices the house has posted so far. */
+  const postsOf = async (feed: PublicKey) => {
+    const info = await connection.getAccountInfo(feed, "confirmed");
+    return (info && decodeHouseFeed(info.data)?.posts) || 0;
+  };
+
   const send = async (ixs: TransactionInstruction[], done: string): Promise<boolean> => {
     if (!wallet || !session) return false;
     setBusy(true);
     setNote(null);
     try {
-      const [latest, held] = await Promise.all([connection.getLatestBlockhash("confirmed"), connection.getBalance(session.publicKey, "confirmed")]);
-      const fund = held < LOW;
-      const tx = new Transaction();
-      if (fund) tx.add(SystemProgram.transfer({ fromPubkey: wallet, toPubkey: session.publicKey, lamports: TOP_UP - held }));
-      tx.add(...ixs);
-      tx.feePayer = fund ? wallet : session.publicKey;
-      tx.recentBlockhash = latest.blockhash;
-      let raw: Uint8Array;
-      if (fund) {
-        if (!signTransaction) throw new Error("This wallet can't sign transactions here");
-        tx.partialSign(session);
-        raw = (await signTransaction(tx)).serialize();
-      } else {
-        tx.sign(session);
-        raw = tx.serialize();
-      }
-      // Sent to devnet by the page, and again every two seconds until it lands.
-      const sig = await connection.sendRawTransaction(raw, { maxRetries: 0 });
-      const resend = setInterval(() => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined), 2000);
+      let sig: string;
       try {
-        const res = await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
-        if (res.value.err) throw new Error(JSON.stringify(res.value.err));
-      } finally {
-        clearInterval(resend);
+        sig = await submit(ixs);
+      } catch (e) {
+        // The house posts its prices only while someone is trading. A trade that finds its price
+        // stale wakes it with a tiny transaction on the house's feed, waits for a fresh price and
+        // goes again.
+        const feed = HOUSE_FEED;
+        if (!feed || explainError(e) !== STALE || !ixs.some((ix) => ix.keys.some((k) => k.pubkey.equals(feed)))) throw e;
+        setNote({ ok: true, text: "Fetching a fresh price…" });
+        const before = await postsOf(feed);
+        await submit([SystemProgram.transfer({ fromPubkey: session.publicKey, toPubkey: feed, lamports: 0 })]);
+        let posted = false;
+        for (let i = 0; i < 20 && !posted; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          posted = (await postsOf(feed)) > before;
+        }
+        if (!posted) throw new Error("No fresh price yet; try again in a moment");
+        sig = await submit(ixs);
       }
       setNote({ ok: true, text: done, sig });
       connection.getBalance(session.publicKey, "confirmed").then(setBalance).catch(() => undefined);

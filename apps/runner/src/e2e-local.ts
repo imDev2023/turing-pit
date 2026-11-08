@@ -605,6 +605,7 @@ async function main() {
     durationMs: 0,
     keeperIntervalMs: 0,
     feedIntervalMs: 2_000,
+    pythPush: false,
     agentIntervalMs: 0,
     pythTreasuryId: undefined,
   } satisfies Config;

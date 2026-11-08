@@ -36,10 +36,10 @@ export function App() {
   const duelMode = mode === "duel";
   const refresh = useRef<(() => void)[]>([]);
   const sender = useSender(() => refresh.current.forEach((f) => f()));
-  const arena = useArena(duelMode ? "sprint" : mode, sender.player);
+  const { quotes } = useQuotes();
+  const arena = useArena(duelMode ? "sprint" : mode, sender.player, quotes);
   const duels = useDuels(duelMode);
   refresh.current = [arena.refresh, duels.refresh];
-  const { quotes } = useQuotes();
   useEffect(() => sender.setNote(null), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     document.title = mode === "sprint" ? "Turing Pit" : `${LEAGUE[mode].label} · Turing Pit`;
@@ -82,7 +82,7 @@ export function App() {
         <WalletMultiButton />
       </header>
 
-      <main>{duelMode ? <DuelsView state={duels} sender={sender} now={now} /> : <LeagueView arena={arena} quotes={quotes} sender={sender} />}</main>
+      <main>{duelMode ? <DuelsView state={duels} quotes={quotes} sender={sender} now={now} /> : <LeagueView arena={arena} quotes={quotes} sender={sender} />}</main>
 
       <section className="agents" aria-label="Agents">
         {PERSONAS.map((p) => (

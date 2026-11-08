@@ -149,7 +149,7 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
     markers.current.setMarkers(list);
   }, [marks, asset, seconds, state]);
 
-  // The Pyth price trades fill at, and the player's own entry.
+  // The price trades fill at (while fresh), and the player's own entry.
   const key = lines.map((l) => `${l.who}:${l.price}:${l.title}`).join("|");
   useEffect(() => {
     const s = series.current;

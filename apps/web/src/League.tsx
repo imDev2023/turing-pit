@@ -79,7 +79,7 @@ export function LeagueView({ arena, quotes, sender }: { arena: ArenaState; quote
 
   return (
     <>
-      <Strip arena={arena} live={live} />
+      <Strip arena={arena} quotes={quotes} live={live} />
       {arena.error && <p className="alert">{arena.error}</p>}
       <div className="terminal">
         <section className="card chart-card" aria-label="Chart">
@@ -119,7 +119,7 @@ export function LeagueView({ arena, quotes, sender }: { arena: ArenaState; quote
   );
 }
 
-function Strip({ arena, live }: { arena: ArenaState; live: boolean }) {
+function Strip({ arena, quotes, live }: { arena: ArenaState; quotes: Quotes; live: boolean }) {
   const { league, now } = arena;
   const open = league.key === "open";
   const exists = !arena.ready || !!arena.round;
@@ -162,11 +162,17 @@ function Strip({ arena, live }: { arena: ArenaState; live: boolean }) {
         {ASSETS.map((a, i) => {
           const p = arena.prices[i];
           const age = p ? Math.max(0, now - p.publishTime) : null;
-          const stale = age === null || age > limit;
+          // Between trades the house posts nothing, so the strip shows Coinbase's live quote; the
+          // next trade posts a fresh median.
+          const q = quotes[a];
+          const onChain = !!p && age !== null && age <= limit;
+          const quoteLive = !!q && now - q.time < 30;
+          const shown = onChain ? p.price : (q?.price ?? p?.price);
+          const fresh = onChain || quoteLive;
           return (
-            <span key={a} className="fill" title={age === null ? "No price" : `${from}, ${age}s old`}>
-              <i className={`dot ${stale ? "stale" : "fresh"}`} aria-label={stale ? "stale" : "fresh"} />
-              {a} <span className="n">{p ? price(a, p.price) : "–"}</span>
+            <span key={a} className="fill" title={onChain ? `${from}, ${age}s old` : quoteLive ? "Coinbase, live" : "No live price"}>
+              <i className={`dot ${fresh ? "fresh" : "stale"}`} aria-label={fresh ? "fresh" : "stale"} />
+              {a} <span className="n">{shown ? price(a, shown) : "–"}</span>
             </span>
           );
         })}
@@ -210,7 +216,10 @@ function TradeChart({ arena, asset, seconds, me, book }: { arena: ArenaState; as
   }, [arena.fills, kinds, myKey]);
   const i = ASSETS.indexOf(asset);
   const mine = book?.[i];
-  const lines: ChartLine[] = [{ price: arena.prices[i]?.price ?? 0, title: "Pyth", who: "pyth" }];
+  // The price trades fill at, while the round has a fresh one on chain.
+  const fill = arena.prices[i];
+  const limit = arena.round?.maxPriceAge ?? sourceLimit(arena.priceShard);
+  const lines: ChartLine[] = fill && arena.now - fill.publishTime <= limit ? [{ price: fill.price, title: "Fill", who: "pyth" }] : [];
   if (mine && mine.qty !== 0 && mine.entry > 0) lines.push({ price: mine.entry, title: "Entry", who: "me" });
   return <Chart asset={asset} seconds={seconds} marks={marks} lines={lines} />;
 }
@@ -239,7 +248,7 @@ function Ticket({
   const [buy, setBuy] = useState(true);
 
   const i = ASSETS.indexOf(asset);
-  const mark = arena.prices[i]?.price ?? 0;
+  const mark = arena.marks[i];
   const held = me ? me.entrant.qty[i] * mark : 0;
   const equity = me ? me.equity : (arena.round?.startCash ?? 10_000);
   const cash = me ? me.entrant.cash : equity;
@@ -340,7 +349,7 @@ function Ticket({
               </button>
             </form>
           )}
-          {me && <Positions me={me} book={book} prices={arena.prices.map((p) => p?.price ?? 0)} live={live} busy={busy} onClose={(a) => trade(a, SIDE_CLOSE, 0, `Closed ${a}`)} />}
+          {me && <Positions me={me} book={book} prices={arena.marks} live={live} busy={busy} onClose={(a) => trade(a, SIDE_CLOSE, 0, `Closed ${a}`)} />}
         </>
       )}
       {note && (
@@ -398,7 +407,7 @@ function Positions({ me, book, prices, live, busy, onClose }: { me: Row; book: P
 }
 
 function Board({ arena, market, marketTo }: { arena: ArenaState; market: (from: number, to: number | null) => number | null; marketTo: number | null }) {
-  const prices = arena.prices.map((p) => p?.price ?? 0);
+  const prices = arena.marks;
   const move = arena.round ? market(arena.start, marketTo) : null;
   let rank = 0;
   return (

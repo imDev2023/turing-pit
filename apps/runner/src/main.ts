@@ -1,5 +1,5 @@
-// The house: posts live prices (and Pyth's, as their check), opens and closes rounds, runs the AI
-// agents and has them answer players' duels.
+// The house: prices trades from the exchanges (on chain only while a game needs them), opens and
+// closes rounds, runs the AI agents and has them answer players' duels.
 // Runs for DURATION_MIN minutes and exits, so a house shift (scripts/house-shift.sh) can hand over
 // cleanly. Exit code 3 means the program isn't deployed yet, so there is nothing to run.
 
@@ -33,8 +33,8 @@ async function main() {
   const duels = new DuelManager(cfg, keeper);
 
   const keeping = keeper.run(until);
-  // Give the house's prices a moment to land, so new rounds start on them.
-  await keeper.ready(45_000);
+  // Give the exchanges a moment to answer, so new rounds start on the house's prices.
+  await keeper.ready(30_000);
   const { shardId } = keeper.source();
   log("main", `new rounds fill at ${shardId === HOUSE_SHARD ? "the house's prices" : shardId === SHARD_ID ? "the keeper's Pyth updates" : "Pyth's sponsored devnet feeds"}`);
   await Promise.all([keeping, rounds.run(until), duels.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);

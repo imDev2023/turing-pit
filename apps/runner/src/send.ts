@@ -1,3 +1,4 @@
+import { utils } from "@coral-xyz/anchor";
 import {
   ComputeBudgetProgram,
   TransactionExpiredBlockheightExceededError,
@@ -8,6 +9,15 @@ import {
   type TransactionInstruction,
 } from "@solana/web3.js";
 import { land } from "./rpc.js";
+
+/** The house's own transactions (its agents' included), by signature, so the price keeper can
+ *  tell a player's transaction on its feed from one of its own. */
+export const ownSignatures = new Set<string>();
+
+export function rememberOwn(signature: Uint8Array) {
+  ownSignatures.add(utils.bytes.bs58.encode(signature));
+  if (ownSignatures.size > 5_000) ownSignatures.delete(ownSignatures.values().next().value!);
+}
 
 /**
  * Signs and sends one transaction and waits for confirmation. The first signer pays.
@@ -35,6 +45,7 @@ export async function sendIxs(
     }).compileToV0Message();
     const tx = new VersionedTransaction(message);
     tx.sign(signers);
+    rememberOwn(tx.signatures[0]);
     const raw = tx.serialize();
     try {
       // Preflight runs on the first send, so program errors surface here with their logs.
