@@ -8,16 +8,12 @@ jobs:
     steps:
       - run: |
           set +e
-          p() { echo "== $1"; curl -s -m 10 -w "\nHTTP %{http_code} in %{time_total}s\n" "${@:2}" | head -c 700; echo; }
-          for round in 1 2; do
-          p binance-vision "https://data-api.binance.vision/api/v3/ticker/price?symbols=%5B%22SOLUSDT%22,%22BTCUSDT%22,%22ETHUSDT%22%5D"
-          p binance-com "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT"
-          p coinbase-ticker "https://api.exchange.coinbase.com/products/SOL-USD/ticker"
-          p coinbase-adv "https://api.coinbase.com/api/v3/brokerage/market/products?product_ids=SOL-USD&product_ids=BTC-USD&product_ids=ETH-USD"
-          p okx "https://www.okx.com/api/v5/market/ticker?instId=SOL-USDT"
-          p okx-tickers "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
-          p hyperliquid "https://api.hyperliquid.xyz/info" -X POST -H "content-type: application/json" -d '{"type":"allMids"}'
-          p kraken "https://api.kraken.com/0/public/Ticker?pair=SOLUSD,XBTUSD,ETHUSD"
-          sleep 5
+          for round in 1 2 3; do
+          echo "== round $round $(date -u +%T)"
+          curl -s -m 10 'https://data-api.binance.vision/api/v3/ticker/bookTicker?symbols=%5B%22SOLUSDC%22,%22BTCUSDC%22,%22ETHUSDC%22,%22SOLUSDT%22,%22BTCUSDT%22,%22ETHUSDT%22%5D' | jq -c '[.[] | {s: .symbol, mid: (((.bidPrice|tonumber)+(.askPrice|tonumber))/2)}]'
+          for i in SOL-USDC BTC-USDC ETH-USDC SOL-USDT; do curl -s -m 10 "https://www.okx.com/api/v5/market/ticker?instId=$i" | jq -c '.data[0] | {i: .instId, mid: (((.bidPx|tonumber)+(.askPx|tonumber))/2), last}'; done
+          for i in SOL-USD BTC-USD ETH-USD USDT-USD; do curl -s -m 10 "https://api.exchange.coinbase.com/products/$i/ticker" | jq -c --arg i $i '{i: $i, mid: (((.bid|tonumber)+(.ask|tonumber))/2), price}'; done
+          curl -s -m 10 -X POST https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d '{"type":"allMids"}' | jq -c '{SOL, BTC, ETH, n: length}'
+          curl -s -m 10 'https://api.kraken.com/0/public/Ticker?pair=SOLUSD,XBTUSD,ETHUSD,USDTZUSD' | jq -c '[.result | to_entries[] | {k: .key, mid: (((.value.a[0]|tonumber)+(.value.b[0]|tonumber))/2)}]'
+          sleep 4
           done
-          curl -s -m 10 https://ipinfo.io/json | head -c 400
