@@ -15,7 +15,6 @@ import {
   LEAGUES,
   MEMO_PROGRAM_ID,
   SHARD_ID,
-  SPONSORED_SHARD_ID,
   bytesToHex,
   decodeEntrant,
   decodeFills,
@@ -24,7 +23,6 @@ import {
   decodeTradeData,
   entrantPda,
   equityOf,
-  feedAccounts,
   reasonHash,
   roundIdAt,
   roundPda,
@@ -38,6 +36,7 @@ import {
   type Round,
 } from "@turing-pit/sdk";
 import { AUTHORITY, PROGRAM_ID } from "./config";
+import { SOURCE_ACCOUNTS, bestSource, readSources } from "./sources";
 
 export interface Row {
   address: string;
@@ -114,7 +113,7 @@ export interface ArenaState {
   history: PastRound[];
   error: string | null;
   ready: boolean;
-  /** The shard of the price feeds shown: the round's own, or before a round the fresher one. */
+  /** The source of the prices shown: the round's own, or before a round the one a new round would use. */
   priceShard: number;
   /** Whether the program is on this cluster; null until the first check. */
   deployed: boolean | null;
@@ -292,19 +291,14 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
       setRows([]);
       setReady(false);
     }
-    // Both price sources a round can use: the house keeper's shard and Pyth's sponsored feeds.
-    const shards = [SHARD_ID, SPONSORED_SHARD_ID];
-    const feeds = shards.flatMap((s) => feedAccounts(s));
     const load = async () => {
       try {
-        const [roundInfo, ...feedInfos] = await connection.getMultipleAccountsInfo([roundAddress, ...feeds]);
+        const [roundInfo, ...sourceInfos] = await connection.getMultipleAccountsInfo([roundAddress, ...SOURCE_ACCOUNTS]);
         const r = roundInfo ? decodeRound(roundInfo.data) : null;
-        const sets = shards.map((_, k) => feedInfos.slice(k * 3, k * 3 + 3).map((f) => (f ? decodePriceUpdate(f.data) : null)));
-        // Show the round's own feeds; before a round exists, whichever source is fresher.
-        const newest = (set: (PythPrice | null)[]) => Math.max(...set.map((x) => x?.publishTime ?? 0));
-        const keeperFresher = newest(sets[0]) > 0 && newest(sets[0]) >= newest(sets[1]);
-        const shard = r ? r.shardId : keeperFresher ? SHARD_ID : SPONSORED_SHARD_ID;
-        let p = sets[shards.indexOf(shard)];
+        const sources = readSources(sourceInfos);
+        // Show the round's own prices; before a round exists, the source a new one would use.
+        const shard = r ? r.shardId : bestSource(sources, Date.now() / 1000).shardId;
+        let p = sources[shard];
         if (!p && r) {
           const own = await connection.getMultipleAccountsInfo(r.feeds);
           p = own.map((f) => (f ? decodePriceUpdate(f.data) : null));

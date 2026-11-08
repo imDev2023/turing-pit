@@ -18,14 +18,16 @@ export function loadConfig() {
     // Paced, with 429s handled in politeFetch rather than by web3.js retrying each on its own.
     connection: new Connection(rpcUrl, { commitment: "confirmed", fetch: politeFetch(), disableRetryOnRateLimit: true }),
     hermesUrl: env("HERMES_URL", "https://hermes.pyth.network"),
-    /** Hermes needs a Pyth API key. Without one the house can't post its own fresh prices and
-     *  the rounds run on Pyth's sponsored devnet feeds instead. */
+    /** Hermes needs a Pyth API key. Without one the house can't post its own Pyth updates, and
+     *  the 1% check and the fallback read Pyth's sponsored devnet feeds instead. */
     pythApiKey: process.env.PYTH_API_KEY ?? "",
     anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
     agentModel: env("AGENT_MODEL", "claude-haiku-5-5"),
     /** How long this run lasts before exiting, so the next house shift can take over cleanly. */
     durationMs: Number(env("DURATION_MIN", "340")) * 60_000,
     keeperIntervalMs: Number(env("KEEPER_INTERVAL_MS", "10000")),
+    /** How often the house posts the exchanges' median prices. */
+    feedIntervalMs: Number(env("FEED_INTERVAL_MS", "2000")),
     agentIntervalMs: Number(env("AGENT_INTERVAL_MS", "45000")),
     /** Pins the Pyth receiver's fee treasury (0-255); by default each update picks one at random. */
     pythTreasuryId: process.env.PYTH_TREASURY_ID ? Number(process.env.PYTH_TREASURY_ID) : undefined,

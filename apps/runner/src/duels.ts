@@ -166,7 +166,7 @@ export class DuelManager {
         const sig = await sendIxs(
           this.cfg.connection,
           [
-            ...unsettled.map((e) => settleIx({ programId: this.cfg.programId, round: address, entrant: e.address, shardId: round.shardId })),
+            ...unsettled.map((e) => settleIx({ programId: this.cfg.programId, round: address, entrant: e.address, feeds: round.feeds })),
             finalizeRoundIx({ programId: this.cfg.programId, round: address, entrants: entrants.map((e) => e.address) }),
           ],
           [this.cfg.keys.authority],
@@ -212,7 +212,7 @@ export class DuelManager {
 
     const context = [
       `Duel: ${style.label}, against ${human.entrant.label} (human). Time left: ${left(round.endTs - now)}.`,
-      "Pyth prices now (% change over 1 minute, 5 minutes and 1 hour):",
+      "Prices now (% change over 1 minute, 5 minutes and 1 hour):",
       ...ASSETS.map(
         (a, i) =>
           `  ${a}: $${fmt(prices[i])} (1m ${pct(this.keeper.change(a, 60) ?? 0)}, 5m ${pct(this.keeper.change(a, 300) ?? 0)}, 1h ${pct(this.keeper.change(a, 3_600) ?? 0)})`,
@@ -234,7 +234,7 @@ export class DuelManager {
 
     const own = (ixs: ReturnType<typeof tradeIx>[]) => [memoIx(call!.reason), ...ixs];
     const trade = (asset: Asset, side: number, usd: number) =>
-      tradeIx({ programId: this.cfg.programId, round: address, player: wallet.publicKey, asset, side, usd, reasonHash: reasonHash(call!.reason), shardId: round.shardId });
+      tradeIx({ programId: this.cfg.programId, round: address, player: wallet.publicKey, asset, side, usd, reasonHash: reasonHash(call!.reason), feeds: round.feeds });
     try {
       if (mine.entrant.trades === 0) {
         if ((call.action !== "long" && call.action !== "short") || !call.asset) {
@@ -253,7 +253,7 @@ export class DuelManager {
           this.cfg.connection,
           [
             ...own([trade(t.asset, SIDE_CLOSE, 0)]),
-            settleIx({ programId: this.cfg.programId, round: address, entrant: mine.address, shardId: round.shardId }),
+            settleIx({ programId: this.cfg.programId, round: address, entrant: mine.address, feeds: round.feeds }),
           ],
           [wallet],
         );

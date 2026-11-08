@@ -5,6 +5,7 @@ import { LAMPORTS_PER_SOL, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   CLOSE_DELAY_SECONDS,
   ENTRANT_SIZE,
+  HOUSE_SHARD,
   LEAGUES,
   PRICE_AGE_KEEPER,
   ROUND_CLOSE_DELAY_SECONDS,
@@ -89,7 +90,8 @@ export class RoundManager {
         [this.cfg.keys.authority],
       );
       this.opened.add(roundId);
-      const feeds = src.shardId === SHARD_ID ? "the house's own Pyth updates" : `Pyth's sponsored feeds (shard ${src.shardId})`;
+      const feeds =
+        src.shardId === HOUSE_SHARD ? "the house's prices" : src.shardId === SHARD_ID ? "the house's own Pyth updates" : `Pyth's sponsored feeds (shard ${src.shardId})`;
       const when = new Date(start * 1000).toISOString().slice(0, 16).replace("T", " ");
       log("rounds", `opened ${leagueOf(roundId).label} round ${roundId} (from ${when} UTC) on ${feeds}, prices up to ${src.maxPriceAge}s old`, sig);
     } catch (e) {
@@ -111,7 +113,7 @@ export class RoundManager {
         await sendIxs(
           this.cfg.connection,
           batch.map((e) =>
-            settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address, shardId: found.round.shardId }),
+            settleIx({ programId: this.cfg.programId, round: found.address, entrant: e.address, feeds: found.round.feeds }),
           ),
           [this.cfg.keys.authority],
           { computeUnits: 400_000 },
@@ -236,8 +238,8 @@ export class RoundManager {
     }
   }
 
-  /** Long rounds (a day or more) outlive any one price source. Once the keeper has started or
-   *  stopped posting for ten minutes (two tidy-ups in a row see the same source), the open long
+  /** Long rounds (a day or more) outlive any one price source. Once a source has started or
+   *  stopped landing for ten minutes (two tidy-ups in a row see the same source), the open long
    *  rounds move to the source new rounds use, so their trades keep filling. */
   private async followPriceSource() {
     const src = this.prices.source();
@@ -266,7 +268,8 @@ export class RoundManager {
           ],
           [this.cfg.keys.authority],
         );
-        log("rounds", `${league.label} round ${roundId} now fills at shard ${src.shardId} prices up to ${src.maxPriceAge}s old`, sig);
+        const at = src.shardId === HOUSE_SHARD ? "the house's prices" : `shard ${src.shardId} prices`;
+        log("rounds", `${league.label} round ${roundId} now fills at ${at} up to ${src.maxPriceAge}s old`, sig);
       } catch (e) {
         log("rounds", `moving ${league.label} round ${roundId} to shard ${src.shardId} failed:`, shortError(e));
       }

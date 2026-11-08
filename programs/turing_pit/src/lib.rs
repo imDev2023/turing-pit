@@ -1,7 +1,8 @@
 //! Turing Pit: AI agents and humans trade the same live markets in short rounds.
 //!
-//! Every entrant starts a round with the same paper cash. Trades fill on chain at the
-//! Pyth price for SOL, BTC or ETH, read from verified Pyth price accounts, long or short. The
+//! Every entrant starts a round with the same paper cash. Trades in SOL, BTC or ETH, long or
+//! short, fill on chain at live prices: the house's feed (the median of several exchanges,
+//! which the program keeps only within 1% of Pyth) or Pyth's own price accounts. The
 //! program enforces the rules (round window, cash, a cap on any one position), records each trade
 //! with a hash of the trader's stated reason, marks every entrant to market when the
 //! round ends, and names the winner.
@@ -67,6 +68,14 @@ pub const MAX_PRICE_AGE: u16 = 900;
 /// Marking a portfolio (other assets in a trade, settlement) accepts prices up to 5 minutes old,
 /// or the round's own limit if that is longer.
 pub const MAX_PRICE_AGE_MARK: i64 = 300;
+/// A round on this shard fills at the house's own prices (`HouseFeed`) instead of Pyth's
+/// push-oracle accounts. The house posts the median of several exchanges every few seconds...
+pub const HOUSE_SHARD: u16 = u16::MAX;
+/// ...and the program keeps a posted price only within 1% of Pyth's...
+pub const GUARD_BPS: u64 = 100;
+/// ...while that Pyth price is at most ten minutes old (Pyth's sponsored devnet feeds update
+/// about every five).
+pub const GUARD_MAX_AGE: i64 = 600;
 /// Entrants per round, kept small so one transaction can finalize the round.
 pub const MAX_ENTRANTS: u32 = 24;
 /// Joining closes 30 seconds before the round ends.
@@ -134,9 +143,7 @@ pub mod turing_pit {
         round.fee_bps = fee_bps;
         round.max_asset_bps = max_asset_bps;
         round.shard_id = shard_id;
-        for (i, feed) in FEED_IDS.iter().enumerate() {
-            round.feeds[i] = price_feed_account(shard_id, feed);
-        }
+        round.feeds = feeds_for(shard_id, &ctx.accounts.authority.key());
         round.entrants = 0;
         round.agents = 0;
         round.settled = 0;
@@ -160,9 +167,10 @@ pub mod turing_pit {
         Ok(())
     }
 
-    /// Moves an unfinished round to another Pyth price source: the house's own shard, or Pyth's
-    /// sponsored feeds. Long rounds outlive any one source, so the house switches them when its
-    /// keeper starts or stops posting and trades keep filling. House only; emitted as an event.
+    /// Moves an unfinished round to another price source: the house's feed (`HOUSE_SHARD`), a
+    /// shard of Pyth updates the house posts, or Pyth's sponsored feeds. Long rounds outlive any
+    /// one source, so the house switches them when a source starts or stops updating and trades
+    /// keep filling. House only; emitted as an event.
     pub fn set_price_source(
         ctx: Context<SetPriceSource>,
         shard_id: u16,
@@ -175,15 +183,53 @@ pub mod turing_pit {
         let round = &mut ctx.accounts.round;
         require!(!round.finalized, PitError::AlreadyFinalized);
         round.shard_id = shard_id;
-        for (i, feed) in FEED_IDS.iter().enumerate() {
-            round.feeds[i] = price_feed_account(shard_id, feed);
-        }
+        round.feeds = feeds_for(shard_id, &ctx.accounts.authority.key());
         round.max_price_age = max_price_age;
         emit!(PriceSourceChanged {
             round: round.key(),
             shard_id,
             max_price_age,
         });
+        Ok(())
+    }
+
+    /// Posts the house's prices, in micro-USD per coin: for each asset the median of the
+    /// exchanges the house reads (0 leaves the asset as it is), and how many exchanges it came
+    /// from. A price is kept only within `GUARD_BPS` of the verified Pyth price passed for its
+    /// asset, which must be at most `GUARD_MAX_AGE` old; any other keeps the asset's last price.
+    /// Fails if no price is kept. The feed belongs to its signer: rounds read the feed of their
+    /// own house.
+    pub fn post_prices(
+        ctx: Context<PostPrices>,
+        prices: [u64; NUM_ASSETS],
+        sources: [u8; NUM_ASSETS],
+    ) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        let guards = [
+            ctx.accounts.pyth_sol.to_account_info(),
+            ctx.accounts.pyth_btc.to_account_info(),
+            ctx.accounts.pyth_eth.to_account_info(),
+        ];
+        let feed = &mut ctx.accounts.feed;
+        feed.authority = ctx.accounts.authority.key();
+        feed.bump = ctx.bumps.feed;
+        let mut kept = 0;
+        for i in 0..NUM_ASSETS {
+            if prices[i] == 0 {
+                continue;
+            }
+            let (pyth, published) = read_pyth(&guards[i], &FEED_IDS[i], true)?;
+            if now.saturating_sub(published) > GUARD_MAX_AGE || !near(prices[i], pyth, GUARD_BPS) {
+                msg!("asset {}: {} not kept, Pyth has {} from {}s ago", i, prices[i], pyth, now.saturating_sub(published));
+                continue;
+            }
+            feed.prices[i] = prices[i];
+            feed.times[i] = now;
+            feed.sources[i] = sources[i];
+            kept += 1;
+        }
+        require!(kept > 0, PitError::PriceRejected);
+        feed.posts = feed.posts.saturating_add(1);
         Ok(())
     }
 
@@ -222,9 +268,7 @@ pub mod turing_pit {
         // One trade, so it may use the whole stake.
         round.max_asset_bps = 10_000;
         round.shard_id = shard_id;
-        for (i, feed) in FEED_IDS.iter().enumerate() {
-            round.feeds[i] = price_feed_account(shard_id, feed);
-        }
+        round.feeds = feeds_for(shard_id, &ctx.accounts.authority.key());
         round.entrants = 0;
         round.agents = 0;
         round.settled = 0;
@@ -582,6 +626,21 @@ pub fn price_feed_account(shard_id: u16, feed_id: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[&shard_id.to_le_bytes(), feed_id], &PYTH_PUSH_ORACLE_ID).0
 }
 
+/// Address of a house's own price feed.
+pub fn house_feed_account(authority: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"house_feed", authority.as_ref()], &crate::ID).0
+}
+
+/// The price accounts a round of `authority` on `shard_id` reads, in asset order: Pyth's
+/// push-oracle accounts for the shard, or for `HOUSE_SHARD` the house's feed, once per asset.
+pub fn feeds_for(shard_id: u16, authority: &Pubkey) -> [Pubkey; NUM_ASSETS] {
+    if shard_id == HOUSE_SHARD {
+        [house_feed_account(authority); NUM_ASSETS]
+    } else {
+        FEED_IDS.map(|feed| price_feed_account(shard_id, &feed))
+    }
+}
+
 /// Reads all three prices (micro-USD per whole coin). `fresh` marks the asset being traded,
 /// whose price must be within the round's `max_price_age`; the others are only marked.
 fn load_prices(
@@ -600,15 +659,33 @@ fn load_prices(
         } else {
             MAX_PRICE_AGE_MARK.max(trade_age)
         };
-        out[i] = read_pyth_price(info, &FEED_IDS[i], now, max_age)?;
+        // The round's feeds are either the house's feed (this program's account) or Pyth's.
+        let (price, published) = if *info.owner == crate::ID {
+            read_house_price(info, i)?
+        } else {
+            read_pyth(info, &FEED_IDS[i], false)?
+        };
+        require!(now.saturating_sub(published) <= max_age, PitError::StalePrice);
+        out[i] = price;
     }
     Ok(out)
+}
+
+/// One asset's price in a house feed, and when it was posted.
+fn read_house_price(info: &AccountInfo, asset: usize) -> Result<(u64, i64)> {
+    let data = info.try_borrow_data()?;
+    let feed = HouseFeed::try_deserialize(&mut &data[..])?;
+    // Never posted yet.
+    require!(feed.prices[asset] > 0, PitError::StalePrice);
+    Ok((feed.prices[asset], feed.times[asset]))
 }
 
 /// Parses a Pyth `PriceUpdateV2` account by hand, so the program needs no Pyth crate:
 /// 8-byte discriminator, write authority (32), verification level (1 or 2 bytes), then the
 /// price message: feed id (32), price i64, conf u64, exponent i32, publish time i64, ...
-fn read_pyth_price(info: &AccountInfo, feed_id: &[u8; 32], now: i64, max_age: i64) -> Result<u64> {
+/// Returns the price in micro-USD and its publish time. `full` also requires that every
+/// Wormhole guardian signature was checked.
+fn read_pyth(info: &AccountInfo, feed_id: &[u8; 32], full: bool) -> Result<(u64, i64)> {
     require_keys_eq!(*info.owner, PYTH_RECEIVER_ID, PitError::BadPriceAccount);
     let data = info.try_borrow_data()?;
     require!(
@@ -617,8 +694,8 @@ fn read_pyth_price(info: &AccountInfo, feed_id: &[u8; 32], now: i64, max_age: i6
     );
     let mut o = 8 + 32;
     match data[o] {
-        0 => o += 2, // Partial { num_signatures: u8 }
-        1 => o += 1, // Full
+        0 if !full => o += 2, // Partial { num_signatures: u8 }
+        1 => o += 1,          // Full
         _ => return err!(PitError::BadPriceAccount),
     }
     require!(data.len() >= o + 84, PitError::BadPriceAccount);
@@ -630,8 +707,7 @@ fn read_pyth_price(info: &AccountInfo, feed_id: &[u8; 32], now: i64, max_age: i6
     o += 4;
     let publish_time = read_i64(&data, o);
     require!(price > 0, PitError::BadPrice);
-    require!(now.saturating_sub(publish_time) <= max_age, PitError::StalePrice);
-    to_micro(price as u64, exponent)
+    Ok((to_micro(price as u64, exponent)?, publish_time))
 }
 
 fn read_i64(data: &[u8], at: usize) -> i64 {
@@ -689,6 +765,27 @@ pub struct SetPriceSource<'info> {
 }
 
 #[derive(Accounts)]
+pub struct PostPrices<'info> {
+    #[account(
+        init_if_needed,
+        payer = authority,
+        space = 8 + HouseFeed::INIT_SPACE,
+        seeds = [b"house_feed", authority.key().as_ref()],
+        bump
+    )]
+    pub feed: Account<'info, HouseFeed>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    /// CHECK: a fully verified Pyth PriceUpdateV2 for SOL/USD, from any shard; parsed by hand.
+    pub pyth_sol: UncheckedAccount<'info>,
+    /// CHECK: the same for BTC/USD.
+    pub pyth_btc: UncheckedAccount<'info>,
+    /// CHECK: the same for ETH/USD.
+    pub pyth_eth: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct JoinRound<'info> {
     #[account(mut)]
     pub round: Account<'info, Round>,
@@ -719,11 +816,11 @@ pub struct Trade<'info> {
     )]
     pub entrant: Account<'info, Entrant>,
     pub player: Signer<'info>,
-    /// CHECK: must equal round.feeds[0]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[0]: the house's feed or a Pyth PriceUpdateV2 account.
     pub price_sol: UncheckedAccount<'info>,
-    /// CHECK: must equal round.feeds[1]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[1], as above.
     pub price_btc: UncheckedAccount<'info>,
-    /// CHECK: must equal round.feeds[2]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[2], as above.
     pub price_eth: UncheckedAccount<'info>,
 }
 
@@ -733,11 +830,11 @@ pub struct Settle<'info> {
     pub round: Account<'info, Round>,
     #[account(mut, has_one = round)]
     pub entrant: Account<'info, Entrant>,
-    /// CHECK: must equal round.feeds[0]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[0]: the house's feed or a Pyth PriceUpdateV2 account.
     pub price_sol: UncheckedAccount<'info>,
-    /// CHECK: must equal round.feeds[1]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[1], as above.
     pub price_btc: UncheckedAccount<'info>,
-    /// CHECK: must equal round.feeds[2]; parsed as a Pyth PriceUpdateV2 account.
+    /// CHECK: must equal round.feeds[2], as above.
     pub price_eth: UncheckedAccount<'info>,
 }
 
@@ -815,6 +912,23 @@ pub struct Entrant {
     pub last_reason_hash: [u8; 32],
     pub final_equity: u64,
     pub settled: bool,
+    pub bump: u8,
+}
+
+/// A house's prices: each the median of the exchanges it reads, kept only within `GUARD_BPS`
+/// of a fresh Pyth price. Rounds on `HOUSE_SHARD` fill here.
+#[account]
+#[derive(InitSpace)]
+pub struct HouseFeed {
+    pub authority: Pubkey,
+    /// Micro-USD per coin, by asset.
+    pub prices: [u64; NUM_ASSETS],
+    /// When each price was kept, by the chain's clock.
+    pub times: [i64; NUM_ASSETS],
+    /// How many exchanges each price is the median of.
+    pub sources: [u8; NUM_ASSETS],
+    /// Posts that kept at least one price.
+    pub posts: u64,
     pub bump: u8,
 }
 
@@ -935,6 +1049,8 @@ pub enum PitError {
     DuelOneTrade,
     #[msg("This duel already has its player and its agent")]
     DuelSeatTaken,
+    #[msg("No price kept: each must be within 1% of a Pyth price at most 10 minutes old")]
+    PriceRejected,
 }
 
 #[cfg(test)]
@@ -946,5 +1062,17 @@ mod layout_tests {
     fn account_sizes_match_client() {
         assert_eq!(8 + Round::INIT_SPACE, 251);
         assert_eq!(8 + Entrant::INIT_SPACE, 191);
+        assert_eq!(8 + HouseFeed::INIT_SPACE, 100);
+    }
+
+    #[test]
+    fn house_rounds_read_one_feed() {
+        let house = Pubkey::new_unique();
+        let feeds = feeds_for(HOUSE_SHARD, &house);
+        assert_eq!(feeds, [house_feed_account(&house); NUM_ASSETS]);
+        assert_ne!(feeds_for(HOUSE_SHARD, &Pubkey::new_unique())[0], feeds[0]);
+        // Pyth shards don't depend on the house.
+        assert_eq!(feeds_for(0, &house), feeds_for(0, &Pubkey::new_unique()));
+        assert_eq!(feeds_for(0, &house)[1], price_feed_account(0, &FEED_IDS[1]));
     }
 }

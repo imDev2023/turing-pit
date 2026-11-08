@@ -17,6 +17,7 @@ import {
   memoIx,
   newDuelId,
   openDuelIx,
+  priceAccounts,
   reasonHash,
   roundPda,
   settleIx,
@@ -106,7 +107,7 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
           openDuelIx({ programId: PROGRAM_ID, authority: AUTHORITY, player, roundId: id, style, shardId, maxPriceAge }),
           joinRoundIx({ programId: PROGRAM_ID, round, player, kind: KIND_HUMAN, label: (savedName() || player.toBase58().slice(0, 6)).slice(0, 24) }),
           memoIx(reason),
-          tradeIx({ programId: PROGRAM_ID, round, player, asset, side: long ? SIDE_BUY : SIDE_SELL, usd: value, reasonHash: reasonHash(reason), shardId }),
+          tradeIx({ programId: PROGRAM_ID, round, player, asset, side: long ? SIDE_BUY : SIDE_SELL, usd: value, reasonHash: reasonHash(reason), feeds: priceAccounts(PROGRAM_ID, AUTHORITY, shardId) }),
         ],
         `Duel on: ${long ? "long" : "short"} ${asset} vs ${PERSONAS[pick].label}`,
       )
@@ -222,8 +223,8 @@ function DuelCard({ duel, state, sender, now, mine = false }: { duel: Duel; stat
     const reason = `Closing my ${you.trade.asset} ${you.trade.long ? "long" : "short"}`;
     const ixs = [
       memoIx(reason),
-      tradeIx({ programId: PROGRAM_ID, round: duel.address, player, asset: you.trade.asset, side: SIDE_CLOSE, usd: 0, reasonHash: reasonHash(reason), shardId: round.shardId }),
-      settleIx({ programId: PROGRAM_ID, round: duel.address, entrant: h.address, shardId: round.shardId }),
+      tradeIx({ programId: PROGRAM_ID, round: duel.address, player, asset: you.trade.asset, side: SIDE_CLOSE, usd: 0, reasonHash: reasonHash(reason), feeds: round.feeds }),
+      settleIx({ programId: PROGRAM_ID, round: duel.address, entrant: h.address, feeds: round.feeds }),
     ];
     // When the agent's trade is already closed, this decides the duel in the same transaction.
     if (duel.agent?.entrant.settled) ixs.push(finalizeRoundIx({ programId: PROGRAM_ID, round: duel.address, entrants: [h.address, duel.agent.address] }));

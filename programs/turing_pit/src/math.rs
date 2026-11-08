@@ -66,6 +66,12 @@ pub fn within_cap(position: i128, equity: i128, cap_bps: u64) -> bool {
             .is_some_and(|p| p <= (equity as u128).saturating_mul(cap_bps as u128))
 }
 
+/// True when `price` is within `bps` basis points of a positive `reference` (both micro-USD).
+pub fn near(price: u64, reference: u64, bps: u64) -> bool {
+    reference > 0
+        && (price.abs_diff(reference) as u128) * 10_000 <= (reference as u128) * (bps as u128)
+}
+
 /// Coins as a signed quantity.
 pub fn to_signed(qty: u64) -> Result<i64> {
     i64::try_from(qty).map_err(|_| error!(PitError::MathOverflow))
@@ -154,6 +160,18 @@ mod tests {
         assert!(!adds_risk(5, 3));
         assert!(!adds_risk(-5, -3));
         assert!(!adds_risk(-5, 0));
+    }
+
+    #[test]
+    fn guard_band() {
+        let pyth = 100 * USD;
+        assert!(near(101 * USD, pyth, 100));
+        assert!(near(99 * USD, pyth, 100));
+        assert!(!near(101 * USD + 1, pyth, 100));
+        assert!(!near(99 * USD - 1, pyth, 100));
+        assert!(!near(USD, 0, 100));
+        // BTC-sized prices don't overflow.
+        assert!(near(75_800 * USD, 75_710 * USD, 100));
     }
 
     #[test]

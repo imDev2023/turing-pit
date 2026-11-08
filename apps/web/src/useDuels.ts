@@ -1,24 +1,9 @@
 import { useEffect, useState } from "react";
 import { useConnection } from "@solana/wallet-adapter-react";
 import type { PublicKey } from "@solana/web3.js";
-import {
-  ENTRANT_SIZE,
-  KIND_AGENT,
-  PRICE_AGE_KEEPER,
-  PRICE_AGE_SPONSORED,
-  ROUND_SIZE,
-  SHARD_ID,
-  SPONSORED_SHARD_ID,
-  decodeEntrant,
-  decodePriceUpdate,
-  decodeRound,
-  feedAccounts,
-  isDuel,
-  type Entrant,
-  type PythPrice,
-  type Round,
-} from "@turing-pit/sdk";
+import { ENTRANT_SIZE, KIND_AGENT, ROUND_SIZE, decodeEntrant, decodeRound, isDuel, type Entrant, type Round } from "@turing-pit/sdk";
 import { AUTHORITY, PROGRAM_ID } from "./config";
+import { SOURCE_ACCOUNTS, bestSource, readSources, type Prices, type Source } from "./sources";
 
 export interface Duel {
   address: PublicKey;
@@ -29,10 +14,10 @@ export interface Duel {
 
 export interface DuelsState {
   duels: Duel[];
-  /** Live prices by shard, for marking open duel trades. */
-  prices: Record<number, (PythPrice | null)[]>;
-  /** The price source a new duel should use: the house's fresh feeds when they are fresh. */
-  source: { shardId: number; maxPriceAge: number };
+  /** Live prices by source, for marking open duel trades. */
+  prices: Record<number, Prices>;
+  /** The price source a new duel should use: the freshest that is working. */
+  source: Source;
   ready: boolean;
   refresh: () => void;
 }
@@ -42,14 +27,13 @@ export interface DuelsState {
 export function useDuels(enabled: boolean): DuelsState {
   const { connection } = useConnection();
   const [duels, setDuels] = useState<Duel[]>([]);
-  const [prices, setPrices] = useState<Record<number, (PythPrice | null)[]>>({});
+  const [prices, setPrices] = useState<Record<number, Prices>>({});
   const [ready, setReady] = useState(false);
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
     if (!enabled || !PROGRAM_ID || !AUTHORITY) return;
     let cancelled = false;
-    const shards = [SHARD_ID, SPONSORED_SHARD_ID];
     const load = async () => {
       try {
         // Byte 45 of a round account is the sixth byte of its id: 6 ("7" in base58) for duels.
@@ -58,7 +42,7 @@ export function useDuels(enabled: boolean): DuelsState {
             filters: [{ dataSize: ROUND_SIZE }, { memcmp: { offset: 8, bytes: AUTHORITY!.toBase58() } }, { memcmp: { offset: 45, bytes: "7" } }],
           }),
           connection.getProgramAccounts(PROGRAM_ID!, { filters: [{ dataSize: ENTRANT_SIZE }] }),
-          connection.getMultipleAccountsInfo(shards.flatMap((s) => feedAccounts(s))),
+          connection.getMultipleAccountsInfo(SOURCE_ACCOUNTS),
         ]);
         const byRound = new Map<string, { address: PublicKey; entrant: Entrant }[]>();
         for (const a of entrants) {
@@ -80,10 +64,9 @@ export function useDuels(enabled: boolean): DuelsState {
             };
           })
           .sort((a, b) => b.round.startTs - a.round.startTs);
-        const decoded = feeds.map((f) => (f ? decodePriceUpdate(f.data) : null));
         if (cancelled) return;
         setDuels(list);
-        setPrices({ [SHARD_ID]: decoded.slice(0, 3), [SPONSORED_SHARD_ID]: decoded.slice(3, 6) });
+        setPrices(readSources(feeds));
         setReady(true);
       } catch {
         // tried again on the next pass
@@ -97,13 +80,10 @@ export function useDuels(enabled: boolean): DuelsState {
     };
   }, [connection, enabled, tick]);
 
-  const now = Date.now() / 1000;
-  const keeper = prices[SHARD_ID] ?? [];
-  const fresh = keeper.length === 3 && keeper.every((p) => p && now - p.publishTime < PRICE_AGE_KEEPER - 15);
   return {
     duels,
     prices,
-    source: fresh ? { shardId: SHARD_ID, maxPriceAge: PRICE_AGE_KEEPER } : { shardId: SPONSORED_SHARD_ID, maxPriceAge: PRICE_AGE_SPONSORED },
+    source: bestSource(prices, Date.now() / 1000),
     ready,
     refresh: () => setTick((t) => t + 1),
   };

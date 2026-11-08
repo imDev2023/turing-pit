@@ -4,9 +4,6 @@ import {
   ASSETS,
   KIND_AGENT,
   KIND_HUMAN,
-  PRICE_AGE_KEEPER,
-  PRICE_AGE_SPONSORED,
-  SHARD_ID,
   SIDE_BUY,
   SIDE_CLOSE,
   SIDE_SELL,
@@ -24,6 +21,7 @@ import { PROGRAM_ID, explorerTx } from "./config";
 import { ago, badge, coins, countdown, kilo, ordinal, pct, price, saveName, savedName, signedUsd, stamp, usd } from "./format";
 import { INTERVALS, priceAt, type Quote } from "./market";
 import type { Sender } from "./send";
+import { sourceLimit, sourceName } from "./sources";
 import type { ArenaState, LastRound, Row, Thought } from "./useArena";
 
 type Quotes = Partial<Record<Asset, Quote>>;
@@ -125,8 +123,8 @@ function Strip({ arena, live }: { arena: ArenaState; live: boolean }) {
   const { league, now } = arena;
   const open = league.key === "open";
   const exists = !arena.ready || !!arena.round;
-  const sponsored = arena.priceShard !== SHARD_ID;
-  const limit = arena.round?.maxPriceAge ?? (sponsored ? PRICE_AGE_SPONSORED : PRICE_AGE_KEEPER);
+  const limit = arena.round?.maxPriceAge ?? sourceLimit(arena.priceShard);
+  const from = sourceName(arena.priceShard);
   let clock: string;
   let label: string;
   if (open) {
@@ -160,13 +158,13 @@ function Strip({ arena, live }: { arena: ArenaState; live: boolean }) {
         )}
       </div>
       {!open && arena.lastRound && <LastResult last={arena.lastRound} />}
-      <div className="fills" aria-label="Pyth fill prices">
+      <div className="fills" aria-label="Fill prices">
         {ASSETS.map((a, i) => {
           const p = arena.prices[i];
           const age = p ? Math.max(0, now - p.publishTime) : null;
           const stale = age === null || age > limit;
           return (
-            <span key={a} className="fill" title={age === null ? "No price" : `Pyth, ${age}s old`}>
+            <span key={a} className="fill" title={age === null ? "No price" : `${from}, ${age}s old`}>
               <i className={`dot ${stale ? "stale" : "fresh"}`} aria-label={stale ? "stale" : "fresh"} />
               {a} <span className="n">{p ? price(a, p.price) : "–"}</span>
             </span>
@@ -258,7 +256,7 @@ function Ticket({
     const reason = why.trim().slice(0, 200) || (side === SIDE_CLOSE ? `Closing ${a}` : "No reason given");
     const ixs = [
       memoIx(reason),
-      tradeIx({ programId: PROGRAM_ID, round: arena.roundAddress, player, asset: a, side, usd: usdValue, reasonHash: reasonHash(reason), shardId: arena.round?.shardId }),
+      tradeIx({ programId: PROGRAM_ID, round: arena.roundAddress, player, asset: a, side, usd: usdValue, reasonHash: reasonHash(reason), feeds: arena.round?.feeds }),
     ];
     // Not in the round yet: joining is part of the same transaction.
     if (!me) {

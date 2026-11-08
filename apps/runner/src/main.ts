@@ -1,9 +1,10 @@
-// The house: keeps Pyth prices fresh, opens and closes rounds, runs the AI agents and has them
-// answer players' duels.
+// The house: posts live prices (and Pyth's, as their check), opens and closes rounds, runs the AI
+// agents and has them answer players' duels.
 // Runs for DURATION_MIN minutes and exits, so a house shift (scripts/house-shift.sh) can hand over
 // cleanly. Exit code 3 means the program isn't deployed yet, so there is nothing to run.
 
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { HOUSE_SHARD, SHARD_ID } from "@turing-pit/sdk";
 import { makeAgents } from "./agents.js";
 import { DuelManager } from "./duels.js";
 import { loadConfig, log } from "./config.js";
@@ -32,9 +33,10 @@ async function main() {
   const duels = new DuelManager(cfg, keeper);
 
   const keeping = keeper.run(until);
-  // With a Pyth API key, give the keeper a moment to post, so new rounds use its fresh prices.
+  // Give the house's prices a moment to land, so new rounds start on them.
   await keeper.ready(45_000);
-  log("main", keeper.posting ? "the keeper is posting fresh Pyth prices" : "rounds will use Pyth's sponsored devnet feeds");
+  const { shardId } = keeper.source();
+  log("main", `new rounds fill at ${shardId === HOUSE_SHARD ? "the house's prices" : shardId === SHARD_ID ? "the keeper's Pyth updates" : "Pyth's sponsored devnet feeds"}`);
   await Promise.all([keeping, rounds.run(until), duels.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
   log("main", "done");
 }

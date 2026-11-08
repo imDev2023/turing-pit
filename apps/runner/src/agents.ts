@@ -204,13 +204,13 @@ export class Agent {
       secondsLeft === null
         ? "League: Open (no end). The highest equity leads."
         : `League: ${league.label}. Time left in this round: ${timeLeft(secondsLeft)}.`,
-      "Pyth prices now (% change over 1 minute, 5 minutes and 1 hour; how long ago the price was published):",
+      "Prices now (% change over 1 minute, 5 minutes and 1 hour; how long ago the price was set):",
       ...ASSETS.map((a, i) => {
         const d = day[a];
         const range = long && d ? `; 24h ${pct(((prices[i] - d.open) / d.open) * 100)}, range $${fmt(d.low)}-$${fmt(d.high)}` : "";
         return `  ${a}: $${fmt(prices[i])} (1m ${pct(this.keeper.change(a, 60))}, 5m ${pct(this.keeper.change(a, 300))}, 1h ${pct(this.keeper.change(a, 3_600))}${range}; ${this.keeper.age(a) ?? "?"}s ago)`;
       }),
-      `Trades fill at the latest published price while it is under ${maxPriceAge}s old.` +
+      `Trades fill at the latest price while it is under ${maxPriceAge}s old.` +
         (maxPriceAge > PRICE_AGE_KEEPER ? " These devnet feeds publish about every 5 minutes, so a price a few minutes old is normal." : ""),
       `Your cash: $${fmt(me.cash)}. Positions: ${ASSETS.map((_, i) => position(i)).join(", ")}.`,
       `The most you can buy right now: ${ASSETS.map((a, i) => `${a} $${fmt(buy[i])}`).join(", ")}. ` +
@@ -329,7 +329,7 @@ export class Agent {
             side: order.side,
             usd: order.usd,
             reasonHash: reasonHash(decision.reason),
-            shardId: found.round.shardId,
+            feeds: found.round.feeds,
           }),
         ],
         [this.wallet],

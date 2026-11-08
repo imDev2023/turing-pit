@@ -32,6 +32,17 @@ export const SPONSORED_SHARD_ID = 0;
 export const PRICE_AGE_KEEPER = 60;
 /** ...and on Pyth's sponsored devnet feeds, whose heartbeat is about 5 minutes. */
 export const PRICE_AGE_SPONSORED = 420;
+/** A round on this shard fills at the house's own prices (its `HouseFeed`): the median of
+ *  Binance, Coinbase, OKX and Hyperliquid, posted every couple of seconds... */
+export const HOUSE_SHARD = 0xffff;
+/** ...a price at most this many seconds old... */
+export const PRICE_AGE_HOUSE = 20;
+/** ...which the program keeps only within 1% of Pyth (in basis points)... */
+export const GUARD_BPS = 100;
+/** ...while that Pyth price is at most ten minutes old (seconds). */
+export const GUARD_MAX_AGE = 600;
+/** The exchanges the house's prices are the median of, in the order it reads them. */
+export const EXCHANGES = ["Binance", "Coinbase", "OKX", "Hyperliquid"] as const;
 
 /** Rounds run every 15 minutes: 14 minutes of trading, then a minute to settle. */
 export const ROUND_SECONDS = 900;
@@ -74,10 +85,12 @@ const IX = {
   closeRound: disc("global:close_round"),
   setPriceSource: disc("global:set_price_source"),
   openDuel: disc("global:open_duel"),
+  postPrices: disc("global:post_prices"),
 };
 const ACCOUNT = {
   round: disc("account:Round"),
   entrant: disc("account:Entrant"),
+  houseFeed: disc("account:HouseFeed"),
   priceUpdateV2: disc("account:PriceUpdateV2"),
 };
 
@@ -85,6 +98,7 @@ export const ROUND_SIZE = 251;
 /** Rounds written before `closed` was added; still decoded, with `closed` read as 0. */
 const ROUND_SIZE_V1 = 247;
 export const ENTRANT_SIZE = 191;
+export const HOUSE_FEED_SIZE = 100;
 
 // ---------- addresses ----------
 
@@ -128,6 +142,19 @@ export function feedAccount(asset: Asset, shardId = SHARD_ID): PublicKey {
 
 export function feedAccounts(shardId = SHARD_ID): [PublicKey, PublicKey, PublicKey] {
   return [feedAccount("SOL", shardId), feedAccount("BTC", shardId), feedAccount("ETH", shardId)];
+}
+
+/** A house's own price feed. */
+export function houseFeedPda(programId: PublicKey, authority: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([enc.encode("house_feed"), authority.toBytes()], programId)[0];
+}
+
+/** The price accounts a round of `authority` on `shardId` reads, in asset order (a round's
+ *  `feeds` hold the same three, once it exists). */
+export function priceAccounts(programId: PublicKey, authority: PublicKey, shardId: number): [PublicKey, PublicKey, PublicKey] {
+  if (shardId !== HOUSE_SHARD) return feedAccounts(shardId);
+  const feed = houseFeedPda(programId, authority);
+  return [feed, feed, feed];
 }
 
 // ---------- rounds ----------
@@ -407,10 +434,13 @@ export function tradeIx(args: {
   /** Dollars: cash to spend on a buy, value to sell on a sell. */
   usd: number;
   reasonHash: Uint8Array;
+  /** The round's price accounts (`round.feeds`, or `priceAccounts` for a round opened in the
+   *  same transaction). Without them, the Pyth accounts of `shardId`. */
+  feeds?: PublicKey[];
   shardId?: number;
 }): TransactionInstruction {
   const entrant = entrantPda(args.programId, args.round, args.player);
-  const [sol, btc, eth] = feedAccounts(args.shardId);
+  const [sol, btc, eth] = args.feeds ?? feedAccounts(args.shardId);
   const micro = BigInt(Math.floor(args.usd * MICRO));
   return new TransactionInstruction({
     programId: args.programId,
@@ -435,9 +465,11 @@ export function settleIx(args: {
   programId: PublicKey;
   round: PublicKey;
   entrant: PublicKey;
+  /** The round's price accounts (`round.feeds`); without them, the Pyth accounts of `shardId`. */
+  feeds?: PublicKey[];
   shardId?: number;
 }): TransactionInstruction {
-  const [sol, btc, eth] = feedAccounts(args.shardId);
+  const [sol, btc, eth] = args.feeds ?? feedAccounts(args.shardId);
   return new TransactionInstruction({
     programId: args.programId,
     keys: [
@@ -504,6 +536,32 @@ export function setPriceSourceIx(args: {
     programId: args.programId,
     keys: [meta(args.round, false, true), meta(args.authority, true, false)],
     data: concat(IX.setPriceSource, u16le(args.shardId), u16le(args.maxPriceAge)),
+  });
+}
+
+/** House only: posts its prices (dollars per coin; 0 leaves an asset as it is), each the median
+ *  of `sources[i]` exchanges. `guards` are verified Pyth price accounts for SOL, BTC and ETH
+ *  (any shard): the program keeps a price only within 1% of its guard's. */
+export function postPricesIx(args: {
+  programId: PublicKey;
+  authority: PublicKey;
+  prices: readonly number[];
+  sources: readonly number[];
+  guards: readonly PublicKey[];
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [
+      meta(houseFeedPda(args.programId, args.authority), false, true),
+      meta(args.authority, true, true),
+      ...args.guards.map((g) => meta(g, false, false)),
+      meta(SystemProgram.programId, false, false),
+    ],
+    data: concat(
+      IX.postPrices,
+      ...args.prices.map((p) => u64le(BigInt(Math.round(p * MICRO)))),
+      Uint8Array.from(args.sources, (n) => Math.min(255, n)),
+    ),
   });
 }
 
@@ -637,6 +695,36 @@ export function decodeEntrant(data: Uint8Array): Entrant | null {
     finalEquity: Number(u64(181)) / MICRO,
     settled: data[189] === 1,
   };
+}
+
+export interface HouseFeed {
+  authority: PublicKey;
+  /** Dollars per coin, by asset; 0 until first posted. */
+  prices: [number, number, number];
+  /** When each price was kept, unix seconds by the chain's clock. */
+  times: [number, number, number];
+  /** How many exchanges each price is the median of. */
+  sources: [number, number, number];
+  posts: number;
+}
+
+export function decodeHouseFeed(data: Uint8Array): HouseFeed | null {
+  if (data.length < HOUSE_FEED_SIZE || !hasDisc(data, ACCOUNT.houseFeed)) return null;
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const price = (i: number) => Number(dv.getBigUint64(40 + 8 * i, true)) / MICRO;
+  const time = (i: number) => Number(dv.getBigInt64(64 + 8 * i, true));
+  return {
+    authority: pk(data, 8),
+    prices: [price(0), price(1), price(2)],
+    times: [time(0), time(1), time(2)],
+    sources: [data[88], data[89], data[90]],
+    posts: Number(dv.getBigUint64(91, true)),
+  };
+}
+
+/** A house feed's prices in the shape of Pyth's, so a round's marks read the same either way. */
+export function houseFeedPrices(feed: HouseFeed): (PythPrice | null)[] {
+  return ASSETS.map((a, i) => (feed.prices[i] > 0 ? { feedId: FEED_IDS[a], price: feed.prices[i], conf: 0, publishTime: feed.times[i] } : null));
 }
 
 export interface PythPrice {
@@ -787,6 +875,7 @@ export const PIT_ERRORS = [
   "Your equity is gone: you can only close or reduce positions",
   "In a duel you open one trade, then close it",
   "This duel already has its player and its agent",
+  "No price kept: each must be within 1% of a Pyth price at most 10 minutes old",
 ];
 
 /** Turns a transaction error into something a player can read. */
@@ -840,7 +929,7 @@ export function agentSystemPrompt(persona: Persona, league: League = LEAGUE.spri
       ? "You are playing the Open league: one round with no end, where the highest equity leads."
       : `You are playing a ${league.noun} round: the highest equity when trading stops wins.`,
     persona.style,
-    "Rules: trade SOL, BTC or ETH at live Pyth prices, long or short. Buy to go long or to cover a short; sell to cut a long, and sell more than you hold to go short; close to flatten a whole position.",
+    "Rules: trade SOL, BTC or ETH at live prices, long or short. Buy to go long or to cover a short; sell to cut a long, and sell more than you hold to go short; close to flatten a whole position.",
     "Every entrant starts with $10,000. Trades cost 0.1%. No single position, long or short, may exceed 50% of your equity. Minimum trade $10.",
     "Only players who trade can win, so sitting in cash all round never wins.",
     "Your reason is published on chain next to your trade, so make it sharp, specific and under 200 characters.",

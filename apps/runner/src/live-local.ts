@@ -3,6 +3,8 @@
 // guardian sets and Pyth's sponsored price accounts) from devnet, then runs this file. It checks
 // the parts the end-to-end test fakes, in both price modes:
 //   - Pyth's sponsored devnet feeds (shard 0): the program trades on the copied accounts;
+//   - the house's prices: the real keeper posts the median of Binance, Coinbase, OKX and
+//     Hyperliquid, the program keeps it within 1% of Pyth, and trades fill at it;
 //   - with PYTH_API_KEY, the real keeper posts Hermes updates to our shard and the program
 //     trades on those;
 //   - with ANTHROPIC_API_KEY, each Claude agent makes one real decision in a house round.
@@ -22,8 +24,10 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, type T
 import {
   ASSETS,
   FEED_IDS,
+  HOUSE_SHARD,
   KIND_HUMAN,
   PERSONAS,
+  PRICE_AGE_HOUSE,
   PRICE_AGE_KEEPER,
   PRICE_AGE_SPONSORED,
   PYTH_PUSH_ORACLE_ID,
@@ -35,11 +39,15 @@ import {
   bytesToHex,
   createRoundIx,
   decodeEntrant,
+  decodeHouseFeed,
   decodePriceUpdate,
   decodeRound,
   entrantPda,
   feedAccounts,
+  houseFeedPda,
+  houseFeedPrices,
   joinRoundIx,
+  priceAccounts,
   memoIx,
   reasonHash,
   roundIdAt,
@@ -107,9 +115,18 @@ async function entrantOf(programId: PublicKey, round: PublicKey, player: PublicK
   return info ? decodeEntrant(info.data) : null;
 }
 
-/** Opens a round on the given price feeds, joins as a human and buys, then sells, SOL. */
+/** A source's prices: Pyth's accounts on a shard, or the house's feed. */
+async function pricesAt(programId: PublicKey, house: PublicKey, shardId: number): Promise<number[] | null> {
+  if (shardId !== HOUSE_SHARD) return (await pricesOn(shardId))?.map((p) => p.price) ?? null;
+  const info = await connection.getAccountInfo(houseFeedPda(programId, house));
+  const feed = info ? decodeHouseFeed(info.data) : null;
+  return feed ? houseFeedPrices(feed).map((p) => p?.price ?? 0) : null;
+}
+
+/** Opens a round on the given price source, joins as a human and buys, then sells, SOL. */
 async function tradeOn(programId: PublicKey, house: Keypair, human: Keypair, shardId: number, maxPriceAge: number) {
   const send = (ixs: TransactionInstruction[], signers: Keypair[]) => sendIxs(connection, ixs, signers);
+  const feeds = priceAccounts(programId, house.publicKey, shardId);
   const now = await chainTime();
   const roundId = 8_000_000 + shardId * 100_000 + (now % 100_000);
   const round = roundPda(programId, house.publicKey, roundId);
@@ -120,18 +137,18 @@ async function tradeOn(programId: PublicKey, house: Keypair, human: Keypair, sha
   const r = decodeRound((await connection.getAccountInfo(round))!.data);
   check(
     `the round reads shard ${shardId} and allows prices up to ${maxPriceAge}s old`,
-    !!r && r.shardId === shardId && r.maxPriceAge === maxPriceAge && r.feeds.every((f, i) => f.equals(feedAccounts(shardId)[i])),
+    !!r && r.shardId === shardId && r.maxPriceAge === maxPriceAge && r.feeds.every((f, i) => f.equals(feeds[i])),
     r,
   );
   await send([joinRoundIx({ programId, round, player: human.publicKey, kind: KIND_HUMAN, label: "Live test" })], [human]);
   const why = `Live test: buying SOL on shard ${shardId}`;
   try {
     await send(
-      [memoIx(why), tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 1000, reasonHash: reasonHash(why), shardId })],
+      [memoIx(why), tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 1000, reasonHash: reasonHash(why), feeds })],
       [human],
     );
     const e = await entrantOf(programId, round, human.publicKey);
-    const sol = (await pricesOn(shardId))?.[0].price ?? 0;
+    const sol = (await pricesAt(programId, house.publicKey, shardId))?.[0] ?? 0;
     check(
       `a $1,000 buy fills at the SOL price on the account ($${((e?.qty[0] ?? 0) * sol).toFixed(2)} of SOL, $${e?.cash.toFixed(2)} cash)`,
       !!e && Math.abs(e.qty[0] * sol - 999) < 10 && Math.abs(e.cash - 9_000) < 0.01,
@@ -139,7 +156,7 @@ async function tradeOn(programId: PublicKey, house: Keypair, human: Keypair, sha
     );
     check("the trade stores the reason's hash", !!e && bytesToHex(e.lastReasonHash) === bytesToHex(reasonHash(why)));
     await send(
-      [tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_SELL, usd: 500, reasonHash: reasonHash(""), shardId })],
+      [tradeIx({ programId, round, player: human.publicKey, asset: "SOL", side: SIDE_SELL, usd: 500, reasonHash: reasonHash(""), feeds })],
       [human],
     );
     const e2 = await entrantOf(programId, round, human.publicKey);
@@ -183,6 +200,7 @@ async function main() {
     agentModel: process.env.AGENT_MODEL || "claude-haiku-5-5",
     durationMs: 0,
     keeperIntervalMs: 5_000,
+    feedIntervalMs: 2_000,
     agentIntervalMs: 0,
     pythTreasuryId: TREASURY_ID,
   } satisfies Config;
@@ -201,6 +219,27 @@ async function main() {
   }
   await tradeOn(programId, house, human, SPONSORED_SHARD_ID, PRICE_AGE_SPONSORED);
 
+  console.log("house prices (the exchanges' median -> the house's feed)");
+  {
+    const landed = await waitFor(async () => (keeper.feeding ? true : null), 90_000);
+    check(`the keeper's posts land (${keeper.feedPosts} sent)`, !!landed, "the feed did not move");
+    const info = await connection.getAccountInfo(houseFeedPda(programId, house.publicKey));
+    const feed = info ? decodeHouseFeed(info.data) : null;
+    check(
+      `each price is a median of several exchanges: ${ASSETS.map((a, i) => `${a} $${feed?.prices[i]} from ${feed?.sources[i]}`).join(", ")}`,
+      !!feed && feed.sources.every((n) => n >= 2),
+      feed,
+    );
+    if (feed && sponsored) {
+      check(
+        "and within 1% of Pyth's",
+        feed.prices.every((p, i) => Math.abs(p - sponsored[i].price) / sponsored[i].price <= 0.01),
+        { feed: feed.prices, pyth: sponsored.map((p) => p.price) },
+      );
+    }
+    await tradeOn(programId, house, human, HOUSE_SHARD, PRICE_AGE_HOUSE);
+  }
+
   console.log("house keeper (Hermes -> push oracle, shard 101)");
   if (!cfg.pythApiKey) {
     console.log("  skip  PYTH_API_KEY is not set (Hermes refuses requests without one)");
@@ -213,10 +252,10 @@ async function main() {
     check("the keeper posts all three feeds to our shard", !!first, keeper.lastError || "no accounts");
     if (first) {
       ASSETS.forEach((a, i) => {
-        const hermes = keeper.latest(a) ?? 0;
+        const median = keeper.latest(a) ?? 0;
         check(
-          `${a} account: feed id matches, $${first[i].price.toFixed(2)} vs Hermes $${hermes.toFixed(2)}`,
-          first[i].feedId === FEED_IDS[a] && Math.abs(first[i].price - hermes) / hermes < 0.01,
+          `${a} account: feed id matches, $${first[i].price.toFixed(2)} vs the exchanges' $${median.toFixed(2)}`,
+          first[i].feedId === FEED_IDS[a] && Math.abs(first[i].price - median) / median < 0.01,
           first[i],
         );
       });

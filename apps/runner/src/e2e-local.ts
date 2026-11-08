@@ -11,9 +11,11 @@ import {
   ASSETS,
   ENTRANT_SIZE,
   FEED_IDS,
+  HOUSE_SHARD,
   KIND_AGENT,
   KIND_HUMAN,
   PIT_ERRORS,
+  PRICE_AGE_HOUSE,
   PRICE_AGE_SPONSORED,
   PYTH_RECEIVER_ID,
   SHARD_ID,
@@ -27,6 +29,7 @@ import {
   createRoundIx,
   decodeEntrant,
   decodeFills,
+  decodeHouseFeed,
   decodePriceUpdate,
   decodeRound,
   decodeTradeData,
@@ -36,12 +39,16 @@ import {
   equityOf,
   explainError,
   feedAccount,
+  feedAccounts,
   finalizeRoundIx,
   hexToBytes,
+  houseFeedPda,
   joinRoundIx,
   memoIx,
   newDuelId,
   openDuelIx,
+  postPricesIx,
+  priceAccounts,
   reasonHash,
   replayFills,
   ROUND_CLOSE_DELAY_SECONDS,
@@ -241,6 +248,67 @@ async function main() {
       [human],
     );
     check("and trades fill there, a short included", (await entrant(programId, week, human.publicKey)).qty[1] < 0);
+  }
+
+  console.log("house prices");
+  {
+    // Shard 101 is the Pyth check here: SOL $187.42, BTC $98,120, ETH $3,412.60.
+    const guards = feedAccounts(SHARD_ID);
+    const feedAddress = houseFeedPda(programId, house.publicKey);
+    const post = (prices: number[], g = guards) => postPricesIx({ programId, authority: house.publicKey, prices, sources: [4, 3, 4], guards: g });
+    const feed = async () => decodeHouseFeed((await connection.getAccountInfo(feedAddress))!.data)!;
+    const cuOf = async (sig: string) =>
+      (await connection.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }))?.meta?.computeUnitsConsumed ?? 0;
+
+    await send([post([187.5, 98_000, 3_410])], [house]);
+    let f = await feed();
+    const t = await chainTime();
+    check(
+      "the house posts the exchanges' medians, each within 1% of Pyth",
+      f.prices.join() === "187.5,98000,3410" && f.sources.join() === "4,3,4" && f.posts === 1 && f.times.every((x) => Math.abs(x - t) <= 5),
+      f,
+    );
+    await send([post([PRICES[0] * 1.02, 98_100, 3_411])], [house]);
+    f = await feed();
+    check("a price more than 1% from Pyth's is dropped; the others are kept", f.prices.join() === "187.5,98100,3411" && f.posts === 2, f);
+    await expectFail("a post with no price within 1% of Pyth's fails", send([post([PRICES[0] * 1.05, PRICES[1] * 0.9, 0])], [house]), msgOf(6029));
+    await expectFail(
+      "each price is checked against its own coin's Pyth account",
+      send([post([187.5, 98_000, 3_410], [guards[1], guards[1], guards[2]])], [house]),
+      msgOf(6012),
+    );
+    const cu = await cuOf(await send([post([187.6, 98_090, 3_412])], [house]));
+    check(`a post uses ${cu} compute units, well under the runner's 40,000`, cu > 0 && cu < 30_000, cu);
+
+    const t0 = await chainTime();
+    const id = 6_000_010;
+    const round = roundPda(programId, house.publicKey, id);
+    await send(
+      [createRoundIx({ programId, authority: house.publicKey, roundId: id, startTs: t0 - 5, endTs: t0 + 600, shardId: HOUSE_SHARD, maxPriceAge: 10 })],
+      [house],
+    );
+    const r = decodeRound((await connection.getAccountInfo(round))!.data)!;
+    check("a round on the house's prices reads its house's feed for every coin", r.shardId === HOUSE_SHARD && r.feeds.every((x) => x.equals(feedAddress)), r);
+    await send([joinRoundIx({ programId, round, player: trader.publicKey, kind: KIND_HUMAN, label: "trader" })], [trader]);
+    const buy = (usd: number) =>
+      tradeIx({ programId, round, player: trader.publicKey, asset: "SOL", side: SIDE_BUY, usd, reasonHash: reasonHash("x"), feeds: r.feeds });
+    await send([post([187.6, 98_090, 3_412]), buy(1000)], [house, trader]);
+    check("and fills at the house's price", Math.abs((await entrant(programId, round, trader.publicKey)).qty[0] - 999 / 187.6) < 1e-6);
+    await waitForChainTime((await feed()).times[0] + 12);
+    await expectFail("but not at a house price older than the round allows", send([buy(100)], [trader]), msgOf(6014));
+    await send([post([187.7, 98_100, 3_413]), buy(100)], [house, trader]);
+    check("a fresh post fills it again", (await entrant(programId, round, trader.publicKey)).trades === 2);
+
+    const week = roundPda(programId, house.publicKey, 6_000_005);
+    await send([setPriceSourceIx({ programId, round: week, authority: house.publicKey, shardId: HOUSE_SHARD, maxPriceAge: PRICE_AGE_HOUSE })], [house]);
+    const w = decodeRound((await connection.getAccountInfo(week))!.data)!;
+    check("the house moves a long round onto its prices", w.shardId === HOUSE_SHARD && w.feeds.every((x) => x.equals(feedAddress)), w);
+    const short = (await entrant(programId, week, human.publicKey)).qty[1];
+    await send(
+      [post([187.7, 98_100, 3_413]), tradeIx({ programId, round: week, player: human.publicKey, asset: "BTC", side: SIDE_BUY, usd: 400, reasonHash: reasonHash("x"), feeds: w.feeds })],
+      [house, human],
+    );
+    check("where a short is bought back at the house's price", Math.abs((await entrant(programId, week, human.publicKey)).qty[1] - (short + 399.6 / 98_100)) < 1e-9);
   }
 
   console.log("duels");
@@ -536,6 +604,7 @@ async function main() {
     agentModel: "stub",
     durationMs: 0,
     keeperIntervalMs: 0,
+    feedIntervalMs: 2_000,
     agentIntervalMs: 0,
     pythTreasuryId: undefined,
   } satisfies Config;
@@ -596,6 +665,23 @@ async function main() {
       decided.finalized && decided.winner.equals(keys.agents[1].publicKey),
       { finalized: decided.finalized, winner: decided.winner.toBase58() },
     );
+  }
+
+  // After the duel runner's checks, so its passes don't take this duel up.
+  {
+    const id = newDuelId(1, 2, () => 0.654321);
+    const duel = roundPda(programId, house.publicKey, id);
+    await send(
+      [
+        postPricesIx({ programId, authority: house.publicKey, prices: [187.7, 98_100, 3_413], sources: [4, 4, 4], guards: feedAccounts(SHARD_ID) }),
+        openDuelIx({ programId, authority: house.publicKey, player: human.publicKey, roundId: id, style: 1, shardId: HOUSE_SHARD, maxPriceAge: PRICE_AGE_HOUSE }),
+        joinRoundIx({ programId, round: duel, player: human.publicKey, kind: KIND_HUMAN, label: "Farhan" }),
+        tradeIx({ programId, round: duel, player: human.publicKey, asset: "ETH", side: SIDE_SELL, usd: 2000, reasonHash: reasonHash("x"), feeds: priceAccounts(programId, house.publicKey, HOUSE_SHARD) }),
+      ],
+      [house, human],
+      400_000,
+    );
+    check("a duel opens on the house's prices with its trade in the same transaction", Math.abs((await entrant(programId, duel, human.publicKey)).qty[2] + 2000 / 3_413) < 1e-9);
   }
 
   const secondsIn = Math.floor(Date.now() / 1000) % 900;
