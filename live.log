@@ -1,0 +1,64 @@
+    Finished `release` profile [optimized] target(s) in 39.85s
+copied programs and accounts
+  ok   Pyth receiver is loaded 
+  ok   Pyth push oracle is loaded 
+  ok   Wormhole is loaded 
+  ok   turing_pit is loaded 
+  ok   the receiver's config was copied from devnet 
+Pyth's sponsored devnet feeds (shard 0)
+  ok   devnet's sponsored accounts were copied: SOL $89.17 (174s old), BTC $75855.59 (174s old), ETH $2235.25 (174s old) 
+  ok   the round reads shard 0 and allows prices up to 420s old 
+13:50:53 [feed] SOL $89.10, BTC $75852.39, ETH $2234.07; exchanges answered Binance 1/1, Coinbase 1/1, OKX 1/1, Hyperliquid 1/1; no player traded, so nothing posted on its own
+  ok   a $1,000 buy fills at the SOL price on the account ($999.00 of SOL, $9000.00 cash) 
+  ok   the trade stores the reason's hash 
+13:50:55 [keeper] posted Pyth update 1 in 3 transactions 4N9jbRA4dAg7Fc8Q1AwtVmh6C4kZT4kWMLFvDBm1u8Xz2kAr7gxAiswDUA8biXXxRWxeFZevFJPzoinSXa3Vz6F1
+  ok   a sell fills too 
+house prices (the exchanges' median, posted when a game needs it)
+  ok   the keeper reads every coin's price from the exchanges 
+  ok   and posts nothing while nobody plays 
+13:51:03 [feed] a player is trading; the house posts prices every 2 s until ten minutes after their last trade
+  ok   a player's transaction wakes it, and the house posts (1 sent) 
+  ok   each price is a median of several exchanges: SOL $89.0875 from 4, BTC $75847.4375 from 4, ETH $2233.8725 from 4 
+  ok   and within 1% of Pyth's 
+  ok   the round reads shard 65535 and allows prices up to 20s old 
+  ok   a $1,000 buy fills at the SOL price on the account ($999.00 of SOL, $9000.00 cash) 
+  ok   the trade stores the reason's hash 
+  ok   a sell fills too 
+house keeper (Hermes -> push oracle, shard 101)
+  ok   the keeper posts all three feeds to our shard 
+  ok   SOL account: feed id matches, $89.08 vs the exchanges' $89.08 
+  ok   BTC account: feed id matches, $75839.17 vs the exchanges' $75844.94 
+  ok   ETH account: feed id matches, $2233.74 vs the exchanges' $2233.88 
+  ok   the keeper keeps the accounts fresh 
+  ..    3 updates posted so far
+  ok   the round reads shard 101 and allows prices up to 60s old 
+  ok   a $1,000 buy fills at the SOL price on the account ($999.00 of SOL, $9000.00 cash) 
+  ok   the trade stores the reason's hash 
+  ok   a sell fills too 
+Claude agents
+13:51:12 [rounds] opened 15 min round 1993495 (from 2026-11-08 13:45 UTC) on the house's prices, prices up to 20s old P24JgMFBTwdjf6Jdyn5K56EowppSFEuiS9LaRuYaa1bYzAUrZJiNoGPAvnqb2xQWZpDFVUjrjhnxozc8QMkV4fq
+13:51:13 [rounds] opened 1 hour round 1099512126149 (from 2026-11-08 13:00 UTC) on the house's prices, prices up to 20s old 5AaGDqSVEyuTYm9qGNoWury765Acezfhf47ip1eaJh1yhX1xEEhVCsoZPnnC23jTNL9Z4xjm5pzjhBez3L4F7xgE
+13:51:14 [rounds] opened 1 day round 2199023276317 (from 2026-11-08 00:00 UTC) on the house's prices, prices up to 20s old 2CPE6cHD6PiuKNmvEawSngv6FeeW7mkj5sFdr3YdxKWLoqyw52LcVKcCQf6TZxvvCSRKruKPY5FN4fpcp39RZHwC
+13:51:14 [rounds] opened 1 week round 3298534886293 (from 2026-11-02 00:00 UTC) on the house's prices, prices up to 20s old 2tgWjY5X9A4WMCoKXoWAG73SHCTGcRSpExk8YtUiHnUaX7dFGCBVcQ1JHFXNdUEv9YnDnQUrYU3aUWaSeK1grK7D
+13:51:15 [rounds] opened 1 month round 4398046511786 (from 2026-11-01 00:00 UTC) on the house's prices, prices up to 20s old 5QaXmdbr5SXkuVGzor1ih6KQ2TrLyME49GxF66dVD7nvzP3aaTn5t2jW51YkxAj1aiR15ThpVc6rpT6nj3Kic9Eo
+13:51:16 [rounds] opened Open round 5497558138880 (from 2026-11-08 00:00 UTC) on the house's prices, prices up to 20s old 5cqDAEbNsttqfA6RUJUBKgf71AGjJ4MsFPnWt5G8tvzg3qy3XpFixD9q1M7L4PLDyCXpZVEfVF5mJKD4hm7mpbnq
+  ok   the house opens the scheduled round on shard 65535 
+13:51:22 [Agent Momentum] joined round 1993495 (15 min)
+  ..    Agent Momentum: 1450 tokens in, 161 out
+13:51:24 [Agent Momentum] [15 min] sold $4900 SOL: Momentum short: SOL down across 5m -0.168% and 1h -0.369%, the weakest of the three. Shorting $4,900 (half equity) to ride the downtrend. 5x4R61tLWFtUj2CHVFDPTiBps3xsSUStbqWsoij3EDCrApVwinchgAani4vnyuTjGpGCacLgCgarfRFdWdB3uS3L
+  ok   Agent Momentum joins the round 
+  ok   Agent Momentum decides: sell SOL 4900 "Momentum short: SOL down across 5m -0.168% and 1h -0.369%, the weakest of the three. Shorting $4,900 (half equity) to ride the downtrend." 
+  ok   Agent Momentum's trade carries its reason's hash 
+13:51:25 [Agent Contrarian] joined round 1993495 (15 min)
+  ..    Agent Contrarian: 1484 tokens in, 150 out
+13:51:26 [Agent Contrarian] [15 min] holds: No overreaction yet: SOL 1m -0.07%, 5m -0.17%, 1h -0.37%. Moves are tiny, so no dip to fade. Waiting for a sharper spike or dip before entering.
+  ok   Agent Contrarian joins the round 
+  ok   Agent Contrarian decides: hold SOL  "No overreaction yet: SOL 1m -0.07%, 5m -0.17%, 1h -0.37%. Moves are tiny, so no dip to fade. Waiting for a sharper spike or dip before entering." 
+13:51:27 [Agent Degen] joined round 1993495 (15 min)
+  ..    Agent Degen: 1502 tokens in, 171 out
+13:51:29 [Agent Degen] [15 min] bought $4900 SOL: Going aggressive: SOL is the high-beta laggard (-0.37% 1h, -0.17% 5m) and tends to snap back hard. Max 50% size to swing for the win, tight risk management to follow. 59CLdemmUxcM319UmQm1YBunDDZGozgwyoGvzQS4VvE2CW52etVgAKgU6MQYykf23cFWc8aeMPCE5jQYfwovbDx4
+  ok   Agent Degen joins the round 
+  ok   Agent Degen decides: buy SOL 4900 "Going aggressive: SOL is the high-beta laggard (-0.37% 1h, -0.17% 5m) and tends to snap back hard. Max 50% size to swing for the win, tight risk management to follow." 
+  ok   Agent Degen's trade carries its reason's hash 
+
+all checks passed
