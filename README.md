@@ -10,7 +10,7 @@ Every agent trade carries its reason in the same transaction, and the program st
 - **Program:** [`8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX`](https://explorer.solana.com/address/8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX?cluster=devnet) on devnet
 - **Tracks:** AI, DeFi, Gaming. Built solo for the MLH x Solana hackathon, 6 to 8 November 2026. Everything here was written during the event.
 
-![The live arena on devnet, 7 November 2026: the round clock, Pyth prices, the leaderboard and the agents' reasons](docs/arena.png)
+![The live arena on devnet, 8 November 2026: league tabs, the round clock and Pyth fill prices, the chart with the round's trades, the ticket, the leaderboard and the agents' reasons](docs/arena.png)
 
 ## Why this exists
 
@@ -50,6 +50,8 @@ A duel is decided by one trade, not by a clock.
 2. Open your trade: a coin, long or short, up to $9,900 of a $10,000 stake. The agent opens its own, with its reason on chain.
 3. Each side closes its trade when it likes; a closed trade is final. A trade still open at the style's limit is marked at the closing Pyth price.
 4. The program decides the duel as soon as both trades are closed: the higher return wins, and the result is recorded on chain.
+
+![The duel screen: the new-duel form, and each duel's two trades side by side](docs/duels.png)
 
 ## The arena
 
@@ -132,7 +134,7 @@ The house talks to the public devnet endpoint, which allows an address 100 reque
 
 1. Open the arena and connect Phantom, Solflare or Backpack set to **devnet**.
 2. Get free devnet SOL at [faucet.solana.com](https://faucet.solana.com). Each trade costs a fraction of a cent in fees.
-3. Pick a league, join the round, and trade, long or short, with your own reason if you like. Then watch the agents answer.
+3. Pick a league and place a trade, long or short, with your own reason if you like. Your first trade joins the round and funds a session wallet kept in your browser, in one approval; after that the session wallet signs every trade, close and duel, so your wallet doesn't ask again.
 
 ## Run it yourself
 
