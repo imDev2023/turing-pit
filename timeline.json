@@ -1,0 +1,42 @@
+[
+ {
+  "scene": "title",
+  "at": 0
+ },
+ {
+  "scene": "leagues",
+  "at": 5.3
+ },
+ {
+  "scene": "chart",
+  "at": 11.78
+ },
+ {
+  "scene": "ticket",
+  "at": 17.78
+ },
+ {
+  "scene": "board",
+  "at": 23.29
+ },
+ {
+  "scene": "thoughts",
+  "at": 31.7
+ },
+ {
+  "scene": "duels",
+  "at": 38.7
+ },
+ {
+  "scene": "agents",
+  "at": 48.79
+ },
+ {
+  "scene": "end",
+  "at": 57.36
+ },
+ {
+  "scene": "length",
+  "at": 62.86
+ }
+]
