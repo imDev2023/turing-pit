@@ -20,6 +20,7 @@ import {
   type Asset,
 } from "@turing-pit/sdk";
 import { log, sleep, type Config } from "./config.js";
+import { land } from "./rpc.js";
 
 export interface PricePoint {
   t: number; // publish time, unix seconds
@@ -124,7 +125,12 @@ export class PriceKeeper {
       const builder = this.receiver.newTransactionBuilder({ closeUpdateAccounts: true });
       await builder.addUpdatePriceFeed(update.binary.data, SHARD_ID);
       const txs = await builder.buildVersionedTransactions({ computeUnitPriceMicroLamports: 2_000 });
-      const sigs = await this.receiver.provider.sendAll(txs, { skipPreflight: true, commitment: "confirmed" });
+      // Each transaction needs the one before it (write the VAA, verify it, post the prices).
+      const sigs: string[] = [];
+      for (const { tx, signers } of txs) {
+        tx.sign([this.cfg.keys.authority, ...(signers ?? [])]);
+        sigs.push(await land(this.cfg.connection, tx.serialize(), { timeoutMs: 45_000 }));
+      }
       this.failures = 0;
       this.posted++;
       this.lastPostedAt = Date.now();

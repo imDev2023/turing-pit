@@ -7,12 +7,14 @@ import {
   type Keypair,
   type TransactionInstruction,
 } from "@solana/web3.js";
+import { land } from "./rpc.js";
 
 /**
  * Signs and sends one transaction and waits for confirmation. The first signer pays.
- * Clusters drop transactions now and then, so the signed bytes are re-sent every two seconds
- * until they land; if the blockhash expires first, the transaction is rebuilt (at most three
- * times), after checking the old one really did not land, so nothing executes twice.
+ * Clusters drop transactions now and then, so the signed bytes are re-sent every few seconds
+ * until they land (see `land`, which polls instead of subscribing); if the blockhash expires
+ * first, the transaction is rebuilt (at most three times), after checking the old one really
+ * did not land, so nothing executes twice.
  */
 export async function sendIxs(
   connection: Connection,
@@ -34,24 +36,12 @@ export async function sendIxs(
     const tx = new VersionedTransaction(message);
     tx.sign(signers);
     const raw = tx.serialize();
-    // Preflight runs on the first send, so program errors surface here with their logs.
-    const sig = await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 0 });
-    const resend = setInterval(() => {
-      connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined);
-    }, 2_000);
     try {
-      const res = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
-      if (res.value.err) throw new Error(`tx ${sig} failed: ${JSON.stringify(res.value.err)}`);
-      return sig;
+      // Preflight runs on the first send, so program errors surface here with their logs.
+      return await land(connection, raw, { lastValidBlockHeight }, true);
     } catch (e) {
+      // `land` has already checked that an expired transaction did not land after all.
       if (!(e instanceof TransactionExpiredBlockheightExceededError) || attempt >= 3) throw e;
-      const status = await connection.getSignatureStatus(sig, { searchTransactionHistory: true });
-      if (status.value?.confirmationStatus) {
-        if (status.value.err) throw new Error(`tx ${sig} failed: ${JSON.stringify(status.value.err)}`);
-        return sig;
-      }
-    } finally {
-      clearInterval(resend);
     }
   }
 }

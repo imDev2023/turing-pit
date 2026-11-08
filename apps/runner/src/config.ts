@@ -1,5 +1,6 @@
 import { Connection } from "@solana/web3.js";
 import { houseKeys } from "./keys.js";
+import { politeFetch } from "./rpc.js";
 
 /** Reads an environment variable; empty values count as unset (CI passes missing secrets as ""). */
 export const env = (name: string, fallback?: string): string => {
@@ -14,7 +15,8 @@ export function loadConfig() {
   return {
     keys,
     programId: keys.program.publicKey,
-    connection: new Connection(rpcUrl, { commitment: "confirmed" }),
+    // Paced, with 429s handled in politeFetch rather than by web3.js retrying each on its own.
+    connection: new Connection(rpcUrl, { commitment: "confirmed", fetch: politeFetch(), disableRetryOnRateLimit: true }),
     hermesUrl: env("HERMES_URL", "https://hermes.pyth.network"),
     /** Hermes needs a Pyth API key. Without one the house can't post its own fresh prices and
      *  the rounds run on Pyth's sponsored devnet feeds instead. */
