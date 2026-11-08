@@ -26,6 +26,7 @@ import {
   closeRoundIx,
   createRoundIx,
   decodeEntrant,
+  decodeFills,
   decodePriceUpdate,
   decodeRound,
   decodeTradeData,
@@ -38,6 +39,7 @@ import {
   joinRoundIx,
   memoIx,
   reasonHash,
+  replayFills,
   ROUND_CLOSE_DELAY_SECONDS,
   roundIdAt,
   roundPda,
@@ -338,6 +340,26 @@ async function main() {
   h = await entrant(programId, round, human.publicKey);
   check("close sells a long exactly", h.qty[0] === 0, h.qty[0]);
   check("trade count", h.trades === 6, h.trades);
+
+  // The arena rebuilds each position and its entry price from the program's Traded events.
+  const mine = await connection.getSignaturesForAddress(entrantPda(programId, round, human.publicKey), {}, "confirmed");
+  const fills = [];
+  for (const s of [...mine].reverse()) {
+    if (s.err) continue;
+    const t = await connection.getTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" });
+    fills.push(...decodeFills(t?.meta?.logMessages));
+  }
+  check("every fill is in its transaction's log", fills.length === 6 && fills.every((f) => f.player.equals(human.publicKey)), fills.length);
+  check(
+    "a fill carries its Pyth price and fee",
+    fills[0]?.asset === "SOL" && fills[0].side === SIDE_BUY && Math.abs(fills[0].price - PRICES[0]) < 1e-6 && Math.abs(fills[0].fee - 1) < 1e-6,
+    fills[0],
+  );
+  const book = replayFills(fills);
+  check("replaying the fills gives the positions on chain", book.every((p, i) => Math.abs(p.qty - h.qty[i]) < 1e-9), book);
+  check("and entries at the fill price", Math.abs(book[1].entry - PRICES[1]) < 1e-6 && book[0].entry === 0, book.map((p) => p.entry));
+  const booked = book.reduce((s, p) => s + p.realized - p.fees, 0);
+  check("realized profit less fees is the equity change", Math.abs(10_000 + booked - equityOf(h, PRICES)) < 0.01, booked);
 
   const agentWhy = "ETH flat while SOL ran: buying the laggard";
   await send(buy(2000, "ETH", agentWhy, agent), [agent]);

@@ -593,6 +593,93 @@ export function equityOf(e: Pick<Entrant, "cash" | "qty">, prices: [number, numb
   return e.cash + e.qty[0] * prices[0] + e.qty[1] * prices[1] + e.qty[2] * prices[2];
 }
 
+// ---------- fills ----------
+
+const EVENT = { traded: disc("event:Traded") };
+/** Discriminator, three keys, asset, side, four u64s, the reason hash and a timestamp. */
+const TRADED_SIZE = 8 + 32 * 3 + 1 + 1 + 8 * 4 + 32 + 8;
+
+/** One trade as the program filled it, read from its `Traded` event. */
+export interface Fill {
+  round: PublicKey;
+  entrant: PublicKey;
+  player: PublicKey;
+  asset: Asset;
+  side: number;
+  /** Dollars moved: the whole spend on a buy; the value before the fee on a sell or a close. */
+  usd: number;
+  /** Coins moved, always positive; the side says which way. */
+  qty: number;
+  /** The Pyth price it filled at, in dollars per coin. */
+  price: number;
+  fee: number;
+  ts: number;
+}
+
+/** The fills in a transaction's log, where Anchor writes each event as a "Program data:" line. */
+export function decodeFills(logs: readonly string[] | null | undefined): Fill[] {
+  const out: Fill[] = [];
+  for (const line of logs ?? []) {
+    if (!line.startsWith("Program data: ")) continue;
+    const data = new Uint8Array(Buffer.from(line.slice(14), "base64"));
+    if (data.length < TRADED_SIZE || !hasDisc(data, EVENT.traded)) continue;
+    const asset = ASSETS[data[104]];
+    if (!asset) continue;
+    const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const u64 = (o: number) => Number(dv.getBigUint64(o, true));
+    out.push({
+      round: pk(data, 8),
+      entrant: pk(data, 40),
+      player: pk(data, 72),
+      asset,
+      side: data[105],
+      usd: u64(106) / MICRO,
+      qty: u64(114) / Number(QTY_SCALE),
+      price: u64(122) / MICRO,
+      fee: u64(130) / MICRO,
+      ts: Number(dv.getBigInt64(170, true)),
+    });
+  }
+  return out;
+}
+
+/** A player's position in one coin, rebuilt from their fills. */
+export interface Position {
+  asset: Asset;
+  /** Coins: positive for a long, negative for a short. */
+  qty: number;
+  /** The open position's average price, in dollars per coin; 0 when flat. */
+  entry: number;
+  /** Profit or loss already taken by reducing or closing, before fees. */
+  realized: number;
+  fees: number;
+  trades: number;
+}
+
+/** Replays one player's fills, oldest first, into a position per coin with its average entry.
+ *  Adding to a position averages the entry; reducing it books profit against the entry; going
+ *  through zero opens the rest at the fill price. */
+export function replayFills(fills: readonly Fill[]): Position[] {
+  const book: Position[] = ASSETS.map((asset) => ({ asset, qty: 0, entry: 0, realized: 0, fees: 0, trades: 0 }));
+  for (const f of fills) {
+    const p = book[ASSETS.indexOf(f.asset)];
+    const old = p.qty;
+    const delta = f.side === SIDE_BUY ? f.qty : f.side === SIDE_SELL ? -f.qty : -old;
+    if (old === 0 || Math.sign(delta) === Math.sign(old)) {
+      p.entry = (p.entry * Math.abs(old) + f.price * Math.abs(delta)) / (Math.abs(old) + Math.abs(delta));
+    } else {
+      const closed = Math.min(Math.abs(delta), Math.abs(old));
+      p.realized += closed * (f.price - p.entry) * Math.sign(old);
+      if (Math.abs(delta) > Math.abs(old)) p.entry = f.price;
+    }
+    p.qty = Math.abs(old + delta) < 1e-10 ? 0 : old + delta;
+    if (p.qty === 0) p.entry = 0;
+    p.fees += f.fee;
+    p.trades += 1;
+  }
+  return book;
+}
+
 /** The program's error messages, in the order of its error enum (Anchor numbers them from 6000). */
 export const PIT_ERRORS = [
   "The round must end after it starts and last at most ten years",

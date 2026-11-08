@@ -312,6 +312,16 @@ jobs:
           if [ -n "$left" ] && [ "$left" != "$size" ]; then
             solana program close "$DEPLOY_BUFFER" 2>&1 | tee -a ci-out/deploy.log || true
           fi
+          # A bigger build needs more room in the program's data account. Devnet (solana-core 4.x)
+          # refuses to grow it by less than 10 KiB at a time ("invalid program argument"), so the
+          # few KB the deploy's own auto-extend asks for fail. Grow it first, with 16 KiB to spare
+          # for the next builds.
+          held=$(solana program show "$PROGRAM_ID" --output json 2>/dev/null |
+            python3 -c "import json, sys; print(json.load(sys.stdin)['dataLen'])" 2>/dev/null) || held=""
+          if [ -n "$held" ] && [ "$held" -lt "$size" ]; then
+            echo "growing the program's data from $held to $(( size + 16384 )) bytes" | tee -a ci-out/deploy.log
+            solana program extend "$PROGRAM_ID" $(( size - held + 16384 )) 2>&1 | tee -a ci-out/deploy.log || true
+          fi
           # The buffer's keypair derives from PIT_SEED, so when devnet drops writes partway, the next
           # try (or the next run) carries on from what was written, and the CLI never prints a
           # recovery phrase for a throwaway buffer into this public log.
