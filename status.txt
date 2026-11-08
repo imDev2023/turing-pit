@@ -1,0 +1,7 @@
+commit: b127643df7348f8115ae14673b253b74143c87a2
+run: https://github.com/imDev2023/turing-pit/actions/runs/42486783378
+finished: 2026-11-08T13:53:43Z
+program: 8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX
+house: 9jP3RKVFVXoxKghjtJmNQxojYU8rwvoy3L3ZCgxxfMNr
+house balance: 7.936477424 SOL
+program account:  Public Key: 8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX Balance: 0.00083312 SOL 

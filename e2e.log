@@ -1,0 +1,133 @@
+    Finished `release` profile [optimized] target(s) in 28.31s
+price accounts
+  ok   SOL feed decodes at $187.42 
+  ok   BTC feed decodes at $98120 
+  ok   ETH feed decodes at $3412.6 
+price age
+  ok   a round's price age is at least 10 seconds 
+  ok   and at most 15 minutes 
+  ok   the round records its price age 
+  ok   a one-minute round refuses a price that is minutes old 
+  ok   a round on Pyth's sponsored feeds accepts it 
+leagues
+  ok   a week-long round opens 
+  ok   so does a ten-year round, the Open league 
+  ok   nothing longer than ten years 
+  ok   only the house moves a round to another price source 
+  ok   the house moves a long round to Pyth's sponsored feeds 
+  ok   and trades fill there, a short included 
+house prices
+  ok   the house posts the exchanges' medians, each within 1% of Pyth 
+  ok   a price more than 1% from Pyth's is dropped; the others are kept 
+  ok   a post with no price within 1% of Pyth's fails 
+  ok   each price is checked against its own coin's Pyth account 
+  ok   a post uses 12564 compute units, well under the runner's 40,000 
+  ok   a round on the house's prices reads its house's feed for every coin 
+  ok   and fills at the house's price 
+  ok   but not at a house price older than the round allows 
+  ok   a fresh post fills it again 
+  ok   the house moves a long round onto its prices 
+  ok   where a short is bought back at the house's price 
+duels
+  ok   a duel's id must carry its style 
+  ok   a player opens a scalp duel and its trade in one transaction 
+  ok   a second human can't take the agent's seat 
+  ok   a duel is one trade: no second one 
+  ok   an open duel can't be decided 
+  ok   closing your duel trade settles it at once 
+  ok   and nothing more can be traded 
+  ok   while the agent's trade is open the duel waits 
+  ok   both trades closed: the duel is decided before its time is up 
+  ok   the better trade wins 
+create_round
+  ok   round decodes 
+  ok   round stores our three feed accounts 
+  ok   a round can't be created twice 
+  ok   a round must end after it starts 
+join_round
+  ok   human joins with $10,000 
+  ok   an agent can't join without the house 
+  ok   agent joins with the house co-signing 
+  ok   nobody joins twice 
+trade
+  ok   buy $1,000 of SOL spends $1,000 cash 
+  ok   and holds $999 of SOL after the 0.1% fee 
+  ok   the reason's hash is stored 
+  ok   the trade decodes from the transaction 
+  ok   the memo carries the reason 
+  ok   trades under $10 are refused 
+  ok   no more than half of equity in one coin 
+  ok   can't spend more cash than you have 
+  ok   selling what you don't hold opens a short 
+  ok   and takes in the proceeds less the fee 
+  ok   the short counts against equity 
+  ok   a short is capped at half of equity too 
+  ok   close buys the short back 
+  ok   nothing to close when flat 
+  ok   partial sell leaves the rest 
+  ok   close sells a long exactly 
+  ok   trade count 
+  ok   every fill is in its transaction's log 
+  ok   a fill carries its Pyth price and fee 
+  ok   replaying the fills gives the positions on chain 
+  ok   and entries at the fill price 
+  ok   realized profit less fees is the equity change 
+  ok   agent's reason hash is stored 
+  ok   a fake price account is refused 
+  ok   settling before the end is refused 
+closing
+  ok   joining closes 30 seconds before the end 
+  ok   no trading after the end 
+  ok   finalize needs everyone settled 
+  ok   an account can't be closed before the round is final 
+  ok   settling twice is refused 
+  ok   finalize needs every entrant 
+  ok   an entrant can't be listed twice 
+  ok   human's final equity is cash plus holdings minus fees 
+  ok   agent's final equity 
+  ok   final equity matches the client's own math 
+  ok   the round is finalized 
+  ok   the agent won 
+  ok   best human and best agent are recorded 
+  ok   finalize only once 
+  ok   sitting in cash all round doesn't win: the player who traded does, $0.10 down 
+  ok   others can't close a player's account until three hours after the round 
+  ok   the player closes their account and gets the rent back (+2214240 lamports) 
+  ok   the round keeps its results 
+  ok   the round counts closed player accounts 
+close_round
+  ok   a round can't be closed while a player's account is open 
+  ok   once every player's account is closed 
+  ok   it still waits six hours after the end 
+  ok   an unfinished round can't be closed 
+  ok   only the house that opened a round can close it 
+  ok   the house closes a finished round six hours on and gets its rent back (+2631840 lamports) 
+runner
+duel runner
+13:52:48 [Agent Contrarian] [duel Scalp GJpjXV] accepted Farhan's challenge
+  ok   the agent named in the duel accepts it 
+13:52:49 [Agent Contrarian] [duel Scalp GJpjXV] opened short ETH $3000: Stub brain: ETH lagging, shorting it 64RN75itGfRaPxpnxGVuvnsphn7U2FBNgrAYoc5cGyP9WTmPe1PKP1AcydbzjYjwzGdFT21aoSwAmWd6F74fBxNs
+  ok   and opens its own trade 
+  ok   the duel prompt shows the challenger's trade 
+13:52:50 [Agent Contrarian] [duel Scalp GJpjXV] closed its ETH short: Stub brain: taking it 4MLsUUZBq87PJwWirLFTnHPtHBb3HjHPtnwGC95KiXz6tBF2PDwwyz45rNv3EvNHhCgoKtRbdYM4c1egLNahBX2i
+  ok   then closes it when its call says so, settling at once 
+13:52:51 [duels] [duel Scalp GJpjXV] decided: Agent Contrarian wins Ci33soKdZJQidNvyQmPfZhFXW3wuRoiDhSvZ6gSEhQgMgWY8U3SkyxRS8N7V82LJPSE3N3TTFmjPDtE3Tp9B9cF
+  ok   the house decides the duel as soon as both trades are closed 
+  ok   a duel opens on the house's prices with its trade in the same transaction 
+13:52:53 [rounds] opened 15 min round 1993495 (from 2026-11-08 13:45 UTC) on the house's own Pyth updates, prices up to 60s old 4TsZSksxFk5efa18q6LL5VbaQmgyWc5Wo2j1YBbmQ49Eb4uTSVwwz5i5Qm9iudXc6bYdhT6KL4ePYYiyKEuuT3y4
+13:52:53 [rounds] opened 1 hour round 1099512126149 (from 2026-11-08 13:00 UTC) on the house's own Pyth updates, prices up to 60s old 5jUVWXhP3vCQexTW45bcyjK1mdUJ5sW5kLFV7VGruqMCokFUQEG5zTTZcT4J1gbyLdmPc43rtgpG65hgxjrd6xRm
+13:52:54 [rounds] opened 1 day round 2199023276317 (from 2026-11-08 00:00 UTC) on the house's own Pyth updates, prices up to 60s old 59xcPZkEkeNy6Ak1ikrWB8JBjD8x1J1GPpyZDzRYHnfB4JCDcdYgQ1raKZBPFrCLuo2ZcWovQKoM8ZCVntWyAQ3B
+13:52:55 [rounds] opened 1 week round 3298534886293 (from 2026-11-02 00:00 UTC) on the house's own Pyth updates, prices up to 60s old 5sHmJM5VueeuAS3tgwspeWURpbH3RPZ27jzjmnSeYfuDdhSu4XTHr9BcP7vZKBLs6eRkq7Yxjm3VqQXuxFoQcsi8
+13:52:55 [rounds] opened 1 month round 4398046511786 (from 2026-11-01 00:00 UTC) on the house's own Pyth updates, prices up to 60s old 24qg4LhjA6wLBbXBnvmid7Tv7x7ahbh7Y1avf8ZNjq79QhYASjHLwT9xn5gPnmzCfxcbByHfZNTwa1mrNzPCT3ir
+13:52:56 [rounds] opened Open round 5497558138880 (from 2026-11-08 00:00 UTC) on the house's own Pyth updates, prices up to 60s old zfuscF437TZUBhgLVomzEALWkzb6XRyQ64v2ZHsafH3WVxNdnSc54WrHCgErmTZGSrzabiuGoN96sZzwuMHSiyi
+  ok   the house opens the current round 
+  ok   until a player joins, the agent stays out of the live round 
+13:53:03 [Agent Contrarian] joined round 1993495 (15 min)
+13:53:04 [Agent Contrarian] [15 min] bought $2500 SOL: Stub brain: SOL +0.42% in a minute rY2Qjqd45FnAgHtdigJ8UzFqXix7rUC42gpHcEaAB4J8EnXEW9w52oU3NkQGiPqpu9hz8k9MUT6hMY7LidzDucY
+  ok   once a player joins, the agent joins the live round 
+  ok   the agent traded on its decision 
+  ok   the prompt carries prices and the board 
+  ok   the prompt says how much the agent can still buy 
+  ok   entrant accounts are the size the client expects 
+
+all checks passed

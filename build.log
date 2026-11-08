@@ -1,0 +1,3 @@
+    Finished `release` profile [optimized] target(s) in 2.14s
+308904 bytes: target/deploy/turing_pit.so
+55b87644a4b9602955b70041f04c6c1f28a1424ef7d440d48071a8efd81e652a  target/deploy/turing_pit.so

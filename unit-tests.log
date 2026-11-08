@@ -1,0 +1,28 @@
+   Compiling anchor-syn v0.32.3
+   Compiling anchor-attribute-constant v0.32.3
+   Compiling anchor-attribute-program v0.32.3
+   Compiling anchor-attribute-error v0.32.3
+   Compiling anchor-derive-accounts v0.32.3
+   Compiling anchor-attribute-account v0.32.3
+   Compiling anchor-attribute-event v0.32.3
+   Compiling anchor-derive-serde v0.32.3
+   Compiling anchor-attribute-access-control v0.32.3
+   Compiling anchor-lang v0.32.3
+   Compiling turing_pit v0.1.0 (/home/runner/work/turing-pit/turing-pit/programs/turing_pit)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.16s
+     Running unittests src/lib.rs (target/debug/deps/turing_pit-e4bb63d974f54f97)
+
+running 10 tests
+test layout_tests::account_sizes_match_client ... ok
+test math::tests::buy_then_value ... ok
+test math::tests::fees ... ok
+test math::tests::equity_and_cap ... ok
+test math::tests::guard_band ... ok
+test math::tests::pyth_exponent_to_micro ... ok
+test math::tests::risk_direction ... ok
+test math::tests::shorts_subtract_and_cap_both_sides ... ok
+test test_id ... ok
+test layout_tests::house_rounds_read_one_feed ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

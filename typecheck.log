@@ -1,0 +1,7 @@
+Scope: 3 of 4 workspace projects
+packages/sdk typecheck$ tsc --noEmit -p .
+packages/sdk typecheck: Done
+apps/runner typecheck$ tsc --noEmit -p .
+apps/web typecheck$ tsc --noEmit -p .
+apps/web typecheck: Done
+apps/runner typecheck: Done
