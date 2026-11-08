@@ -50,13 +50,13 @@ async function openArena(context) {
   page.rpcErrors = watchRpc(page);
   await page.goto(url, { waitUntil: "load", timeout: 60_000 });
   await page
-    .waitForFunction(() => /\$\d/.test(document.querySelector(".prices")?.textContent ?? ""), null, { timeout: 60_000 })
+    .waitForFunction(() => /\$\d/.test(document.querySelector(".fills")?.textContent ?? ""), null, { timeout: 60_000 })
     .catch(() => console.log("no prices after a minute; taking the shots anyway"));
   await page
-    .waitForSelector(".thoughts .thought", { timeout: 45_000 })
+    .waitForSelector(".reasons .reason", { timeout: 45_000 })
     .catch(() => console.log("no agent reasons on the page after 45 s"));
   await page
-    .waitForFunction(() => !document.querySelector(".chart-panel .chart-state"), null, { timeout: 30_000 })
+    .waitForFunction(() => !document.querySelector(".chart-card .chart-state"), null, { timeout: 30_000 })
     .catch(() => console.log("no chart candles after 30 s"));
   await page.waitForTimeout(5_000);
   return page;
@@ -68,19 +68,14 @@ async function describe(page) {
     const all = (sel) => [...document.querySelectorAll(sel)];
     return {
       at: new Date().toISOString(),
-      league: t(document.querySelector(".leagues .on")),
-      clock: `${t(document.querySelector(".clock-label"))} ${t(document.querySelector(".clock-time"))}`,
-      tickers: all(".tickers .ticker").map(t),
-      chart: document.querySelector(".chart-panel .chart-state") ? t(document.querySelector(".chart-panel .chart-state")) : "candles shown",
-      lastRound: t(document.querySelector(".last-round")) || null,
-      clockNote: t(document.querySelector(".clock-sub")),
+      league: t(document.querySelector(".modes .on")),
+      strip: t(document.querySelector(".strip")),
+      tickers: all(".chart-card .seg button").map(t),
+      chart: document.querySelector(".chart-card .chart-state") ? t(document.querySelector(".chart-card .chart-state")) : "candles shown",
       score: t(document.querySelector(".score")),
-      banner: t(document.querySelector(".banner")) || null,
-      prices: all(".prices .price").map(t),
-      priceSource: t(document.querySelector(".prices .src")),
-      board: all(".board .row").map(t),
-      boardNote: t(document.querySelector(".board-panel .empty")) || null,
-      thoughts: all(".thoughts .thought").slice(0, 6).map(t),
+      alert: t(document.querySelector(".alert")) || null,
+      board: all(".board tbody tr").map(t),
+      reasons: all(".reasons .reason").slice(0, 6).map(t),
       history: all(".history li").slice(0, 6).map(t),
     };
   });
@@ -209,34 +204,33 @@ async function walkthrough() {
   await wait(0.8);
 
   scene("leagues");
-  await spot(p, ".leagues");
-  await caption(p, "Pick a league: fifteen minutes, an hour, a day, a week, a month, or the Open league with no end.");
+  await spot(p, ".modes");
+  await caption(p, "Pick a league: fifteen minutes, an hour, a day, a week, a month, or the Open league.");
   await wait(2.2);
-  await p.locator(".leagues button", { hasText: "1 week" }).click().catch(() => {});
+  await p.locator(".modes button", { hasText: "1 week" }).click().catch(() => {});
   await wait(2.2);
-  await p.locator(".leagues button", { hasText: "15 min" }).click().catch(() => {});
+  await p.locator(".modes button", { hasText: "15 min" }).click().catch(() => {});
   await wait(2);
 
   scene("chart");
-  await glide(p, ".terminal", 24);
-  await spot(p, ".chart-panel");
-  await caption(p, "A live chart, with every trade of the round marked on it, read from the program's events.");
+  await spot(p, ".chart-card");
+  await caption(p, "Every trade of the round is marked on the chart, read from the program's events.");
   await wait(6);
 
   scene("ticket");
-  await spot(p, ".seat");
+  await spot(p, ".ticket");
   await caption(p, "Go long or short with your wallet. Trades fill on chain at the latest Pyth price.");
   await wait(5.5);
 
   scene("board");
-  await glide(p, ".grid", 70);
-  await spot(p, ".board-panel");
+  await glide(p, ".lower", 70);
+  await spot(p, '[aria-label="Leaderboard"]');
   await caption(p, "A Solana program keeps the books. Only players who trade are ranked, and every return is measured against the market.");
   await wait(7);
 
-  const hasThoughts = await p.locator(".thoughts .thought").count();
+  const hasThoughts = await p.locator(".reasons .reason").count();
   scene("thoughts");
-  await spot(p, ".thoughts");
+  await spot(p, ".reasons");
   await caption(
     p,
     hasThoughts
@@ -245,23 +239,25 @@ async function walkthrough() {
   );
   await wait(7);
 
-  if (await p.locator(".history").count()) {
-    scene("history");
-    await glide(p, ".history", 90);
-    await spot(p, ".history");
-    await caption(p, "Every finished round, and who won it, comes straight from the chain.");
-    await wait(5);
-  }
+  scene("duels");
+  await glide(p, ".app", 0, 900);
+  await p.locator(".modes button", { hasText: "Duels" }).click().catch(() => {});
+  await p.waitForTimeout(1500);
+  await spot(p, ".duels");
+  await caption(p, "Or challenge an agent to a duel: one trade each, closed whenever you like. The better return wins.");
+  await wait(7);
+  await p.locator(".modes button", { hasText: "15 min" }).click().catch(() => {});
+  await p.waitForTimeout(600);
 
   scene("agents");
   await glide(p, ".agents", 70);
   await spot(p, null);
   await p.locator(".agents details summary").first().click().catch(() => {});
-  await caption(p, "Each agent is Claude with its own wallet and its own style, in every league. Its full prompt is on the page.");
+  await caption(p, "Each agent is Claude with its own wallet and its own style. Its full prompt is on the page.");
   await wait(6.5);
 
-  const first = p.locator(".thoughts .thought").first();
-  const tx = hasThoughts ? await first.locator("footer a").getAttribute("href") : null;
+  const first = p.locator(".reasons .reason").first();
+  const tx = hasThoughts ? await first.locator(".foot a").getAttribute("href") : null;
   const reason = hasThoughts ? ((await first.locator("blockquote").textContent()) ?? "").trim() : "";
   const endCard = `<h1>Turing Pit</h1><p>Play at <b>${site}</b></p><p>Code at <b>github.com/imDev2023/turing-pit</b></p><p>Built for the MLH x Solana hackathon</p>`;
   if (tx) {
@@ -343,21 +339,24 @@ const page = await openArena(desk);
 await page.screenshot({ path: join(out, "desktop.png") });
 await page.screenshot({ path: join(out, "desktop-full.png"), fullPage: true });
 for (const [name, sel] of [
-  ["leagues", ".leagues"],
+  ["strip", ".strip"],
   ["terminal", ".terminal"],
-  ["chart", ".chart-panel"],
-  ["ticket", ".seat"],
-  ["positions", ".positions"],
-  ["prices", ".prices"],
-  ["board", ".board-panel"],
-  ["thoughts", ".thoughts"],
-  ["history", ".history"],
+  ["chart", ".chart-card"],
+  ["ticket", ".ticket"],
+  ["board", '[aria-label="Leaderboard"]'],
+  ["reasons", ".reasons"],
+  ["history", '[aria-label="Recent rounds"]'],
   ["agents", ".agents"],
 ]) {
   const el = page.locator(sel).first();
   if (await el.count()) await el.screenshot({ path: join(out, `${name}.png`) });
 }
 const facts = { ...(await describe(page)), rpcErrors: page.rpcErrors() };
+// The duels screen.
+await page.evaluate(() => window.scrollTo(0, 0));
+await page.locator(".modes button", { hasText: "Duels" }).click().catch(() => {});
+await page.waitForTimeout(6_000);
+await page.screenshot({ path: join(out, "duels.png") });
 writeFileSync(join(out, "page.json"), JSON.stringify(facts, null, 2) + "\n");
 console.log(JSON.stringify(facts, null, 2));
 await desk.close();

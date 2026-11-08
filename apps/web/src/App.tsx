@@ -44,6 +44,9 @@ export function App() {
     duels.refresh();
   });
   useEffect(() => sender.setNote(null), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    document.title = mode === "sprint" ? "Turing Pit" : `${LEAGUE[mode].label} · Turing Pit`;
+  }, [mode]);
   const { now } = arena;
 
   return (
