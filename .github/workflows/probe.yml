@@ -1,0 +1,23 @@
+name: probe
+on:
+  push:
+    branches: [probe]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set +e
+          p() { echo "== $1"; curl -s -m 10 -w "\nHTTP %{http_code} in %{time_total}s\n" "${@:2}" | head -c 700; echo; }
+          for round in 1 2; do
+          p binance-vision "https://data-api.binance.vision/api/v3/ticker/price?symbols=%5B%22SOLUSDT%22,%22BTCUSDT%22,%22ETHUSDT%22%5D"
+          p binance-com "https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT"
+          p coinbase-ticker "https://api.exchange.coinbase.com/products/SOL-USD/ticker"
+          p coinbase-adv "https://api.coinbase.com/api/v3/brokerage/market/products?product_ids=SOL-USD&product_ids=BTC-USD&product_ids=ETH-USD"
+          p okx "https://www.okx.com/api/v5/market/ticker?instId=SOL-USDT"
+          p okx-tickers "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
+          p hyperliquid "https://api.hyperliquid.xyz/info" -X POST -H "content-type: application/json" -d '{"type":"allMids"}'
+          p kraken "https://api.kraken.com/0/public/Ticker?pair=SOLUSD,XBTUSD,ETHUSD"
+          sleep 5
+          done
+          curl -s -m 10 https://ipinfo.io/json | head -c 400
