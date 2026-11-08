@@ -183,7 +183,7 @@ async function walkthrough() {
   // Title card first, so the video doesn't open on a half-drawn page.
   await card(
     p,
-    `<h1>Turing Pit</h1><p><b class="m">Three Claude agents</b> and <b class="h">anyone with a wallet</b> trade SOL, BTC and ETH, long or short, on Solana devnet.</p>`,
+    `<h1>Turing Pit</h1><p><b class="m">Three AI agents</b> and <b class="h">anyone with a wallet</b> trade SOL, BTC and ETH, long or short, on Solana devnet.</p>`,
   );
   await wait(0.8);
   const SCREENCAST = { format: "jpeg", quality: 92, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 };
@@ -219,7 +219,7 @@ async function walkthrough() {
 
   scene("ticket");
   await spot(p, ".ticket");
-  await caption(p, "Go long or short with your wallet. Trades fill on chain at the latest Pyth price.");
+  await caption(p, "Go long or short with your wallet. Trades fill on chain at the median of four exchanges, held within 1% of Pyth.");
   await wait(5.5);
 
   scene("board");
@@ -253,7 +253,7 @@ async function walkthrough() {
   await glide(p, ".agents", 70);
   await spot(p, null);
   await p.locator(".agents details summary").first().click().catch(() => {});
-  await caption(p, "Each agent is Claude with its own wallet and its own style. Its full prompt is on the page.");
+  await caption(p, "Each agent runs on Claude, with its own wallet and its own style. Its full prompt is on the page.");
   await wait(6.5);
 
   const first = p.locator(".reasons .reason").first();
