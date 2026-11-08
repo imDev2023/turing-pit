@@ -75,7 +75,7 @@ export function LeagueView({ arena, quotes, sender }: { arena: ArenaState; quote
   const [asset, setAsset] = useState<Asset>("SOL");
   const [interval, setInterval_] = useState(DEFAULT_INTERVAL[league.key]);
   useEffect(() => setInterval_(DEFAULT_INTERVAL[league.key]), [league.key]);
-  const me = sender.publicKey ? arena.rows.find((r) => r.entrant.player.equals(sender.publicKey!)) : undefined;
+  const me = sender.player ? arena.rows.find((r) => r.entrant.player.equals(sender.player!)) : undefined;
   const live = now < arena.end;
   const marketTo = live ? null : arena.end;
   const market = useMarket(quotes, [arena.start, ...arena.rows.map((r) => Math.max(arena.start, r.entrant.joinedTs)), ...(marketTo ? [marketTo] : [])], now);
@@ -237,144 +237,133 @@ function Ticket({
   live: boolean;
 }) {
   const { connection } = useConnection();
-  const { publicKey, busy, note } = sender;
+  const { wallet, player, busy, note } = sender;
   const [name, setName] = useState(savedName);
   const [amount, setAmount] = useState("1000");
   const [why, setWhy] = useState("");
   const [buy, setBuy] = useState(true);
   const [sol, setSol] = useState<number | null>(null);
 
+  // The first action also funds the session wallet from this wallet, which needs devnet SOL.
   useEffect(() => {
-    if (!publicKey) return setSol(null);
+    if (!wallet || sender.ready) return setSol(null);
     let alive = true;
     connection
-      .getBalance(publicKey)
+      .getBalance(wallet)
       .then((b) => alive && setSol(b / LAMPORTS_PER_SOL))
       .catch(() => alive && setSol(null));
     return () => {
       alive = false;
     };
-  }, [connection, publicKey, note]);
+  }, [connection, wallet, sender.ready, note]);
 
   const i = ASSETS.indexOf(asset);
   const mark = arena.prices[i]?.price ?? 0;
   const held = me ? me.entrant.qty[i] * mark : 0;
-  const cap = me ? me.equity * ((arena.round?.maxAssetBps ?? 5_000) / 10_000) : 0;
+  const equity = me ? me.equity : (arena.round?.startCash ?? 10_000);
+  const cash = me ? me.entrant.cash : equity;
+  const cap = equity * ((arena.round?.maxAssetBps ?? 5_000) / 10_000);
   // Buying covers a short before it adds a long; selling cuts a long before it adds a short.
-  const room = me ? (buy ? Math.max(0, Math.min(me.entrant.cash, cap - held)) : Math.max(0, cap + held)) : 0;
+  const room = buy ? Math.max(0, Math.min(cash, cap - held)) : Math.max(0, cap + held);
   const traders = arena.rows.filter((r) => r.entrant.trades > 0);
   const rank = me && me.entrant.trades > 0 ? traders.indexOf(me) + 1 : null;
   const value = Number(amount);
+  const canTrade = !!arena.round && live;
 
-  const join = () => {
-    if (!publicKey || !PROGRAM_ID || !arena.roundAddress) return;
-    const label = (name.trim() || publicKey.toBase58().slice(0, 6)).slice(0, 24);
-    if (name.trim()) saveName(name.trim());
-    sender.send([joinRoundIx({ programId: PROGRAM_ID, round: arena.roundAddress, player: publicKey, kind: KIND_HUMAN, label })], "Joined");
-  };
   const trade = (a: Asset, side: number, usdValue: number, done: string) => {
-    if (!publicKey || !PROGRAM_ID || !arena.roundAddress) return;
+    if (!player || !PROGRAM_ID || !arena.roundAddress) return;
     const reason = why.trim().slice(0, 200) || (side === SIDE_CLOSE ? `Closing ${a}` : "No reason given");
-    sender
-      .send(
-        [
-          memoIx(reason),
-          tradeIx({ programId: PROGRAM_ID, round: arena.roundAddress, player: publicKey, asset: a, side, usd: usdValue, reasonHash: reasonHash(reason), shardId: arena.round?.shardId }),
-        ],
-        done,
-      )
-      .then((ok) => ok && setWhy(""));
+    const ixs = [
+      memoIx(reason),
+      tradeIx({ programId: PROGRAM_ID, round: arena.roundAddress, player, asset: a, side, usd: usdValue, reasonHash: reasonHash(reason), shardId: arena.round?.shardId }),
+    ];
+    // Not in the round yet: joining is part of the same transaction.
+    if (!me) {
+      const label = (name.trim() || player.toBase58().slice(0, 6)).slice(0, 24);
+      if (name.trim()) saveName(name.trim());
+      ixs.unshift(joinRoundIx({ programId: PROGRAM_ID, round: arena.roundAddress, player, kind: KIND_HUMAN, label }));
+    }
+    sender.send(ixs, done).then((ok) => ok && setWhy(""));
   };
   const submit = () => {
     if (!(value >= 10)) return sender.setNote({ ok: false, text: "Minimum $10" });
     trade(asset, buy ? SIDE_BUY : SIDE_SELL, value, `${buy ? "Bought" : "Sold"} ${usd(value, 0)} of ${asset}`);
   };
+  const verb = buy ? (held < -0.5 ? "Cover" : "Buy") : held > 0.5 ? "Sell" : "Short";
 
   return (
     <section className="card ticket" aria-label="Trade">
-      {!publicKey ? (
+      {!wallet ? (
         <div className="body center">
           <WalletMultiButton />
         </div>
-      ) : !me ? (
-        <div className="body">
-          {sol !== null && sol < 0.01 && (
-            <a className="btn ghost wide" href="https://faucet.solana.com" target="_blank" rel="noreferrer">
-              Get devnet SOL
-            </a>
-          )}
-          {arena.round && live ? (
-            <form
-              className="join"
-              onSubmit={(e) => {
-                e.preventDefault();
-                join();
-              }}
-            >
-              <input aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" maxLength={24} />
-              <button className="btn primary" disabled={busy}>
-                Join
-              </button>
-            </form>
-          ) : (
-            <p className="lead">{arena.round ? "Round closed" : "Round opening soon"}</p>
-          )}
-        </div>
       ) : (
         <>
-          <dl className="me">
-            <div>
-              <dt>Equity</dt>
-              <dd className="n">{usd(me.equity, 0)}</dd>
-            </div>
-            <div>
-              <dt>Return</dt>
-              <dd className={`n ${me.pnlPct >= 0 ? "up" : "down"}`}>{pct(me.pnlPct)}</dd>
-            </div>
-            <div>
-              <dt>Rank</dt>
-              <dd className="n">{rank ? `${rank}/${traders.length}` : "–"}</dd>
-            </div>
-          </dl>
-          <form
-            className="body order"
-            onSubmit={(e) => {
-              e.preventDefault();
-              submit();
-            }}
-          >
-            <div className="seg wide" role="radiogroup" aria-label="Side">
-              <button type="button" role="radio" aria-checked={buy} className={buy ? "on buy" : ""} onClick={() => setBuy(true)}>
-                {held < -0.5 ? "Cover" : "Buy"}
-              </button>
-              <button type="button" role="radio" aria-checked={!buy} className={!buy ? "on sell" : ""} onClick={() => setBuy(false)}>
-                {held > 0.5 ? "Sell" : "Short"}
-              </button>
-            </div>
-            <div className="seg wide" role="radiogroup" aria-label="Coin">
-              {ASSETS.map((a) => (
-                <button type="button" key={a} role="radio" aria-checked={a === asset} className={a === asset ? "on" : ""} onClick={() => onAsset(a)}>
-                  {a}
+          {me && (
+            <dl className="me">
+              <div>
+                <dt>Equity</dt>
+                <dd className="n">{usd(me.equity, 0)}</dd>
+              </div>
+              <div>
+                <dt>Return</dt>
+                <dd className={`n ${me.pnlPct >= 0 ? "up" : "down"}`}>{pct(me.pnlPct)}</dd>
+              </div>
+              <div>
+                <dt>Rank</dt>
+                <dd className="n">{rank ? `${rank}/${traders.length}` : "–"}</dd>
+              </div>
+            </dl>
+          )}
+          {!me && !canTrade ? (
+            <p className="lead">{arena.round ? "Round closed" : "Round opening soon"}</p>
+          ) : (
+            <form
+              className="body order"
+              onSubmit={(e) => {
+                e.preventDefault();
+                submit();
+              }}
+            >
+              {sol !== null && sol < 0.11 && (
+                <a className="btn ghost wide" href="https://faucet.solana.com" target="_blank" rel="noreferrer">
+                  Get devnet SOL
+                </a>
+              )}
+              {!me && <input aria-label="Name on the board" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" maxLength={24} />}
+              <div className="seg wide" role="radiogroup" aria-label="Side">
+                <button type="button" role="radio" aria-checked={buy} className={buy ? "on buy" : ""} onClick={() => setBuy(true)}>
+                  {held < -0.5 ? "Cover" : "Buy"}
                 </button>
-              ))}
-            </div>
-            <label className="amount">
-              <span>$</span>
-              <input aria-label="Amount in dollars" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" />
-            </label>
-            <div className="presets">
-              {[0.25, 0.5, 1].map((f) => (
-                <button type="button" key={f} onClick={() => setAmount(String(Math.floor(room * f)))}>
-                  {f === 1 ? `Max ${kilo(room)}` : `${f * 100}%`}
+                <button type="button" role="radio" aria-checked={!buy} className={!buy ? "on sell" : ""} onClick={() => setBuy(false)}>
+                  {held > 0.5 ? "Sell" : "Short"}
                 </button>
-              ))}
-            </div>
-            <input aria-label="Reason, posted on chain" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Reason (on chain)" maxLength={200} />
-            <button className={`btn wide ${buy ? "buy" : "sell"}`} disabled={busy || !live}>
-              {busy ? "Sending…" : `${buy ? (held < -0.5 ? "Cover" : "Buy") : held > 0.5 ? "Sell" : "Short"} ${asset} ${value >= 10 ? usd(value, 0) : ""}`}
-            </button>
-          </form>
-          <Positions me={me} book={book} prices={arena.prices.map((p) => p?.price ?? 0)} live={live} busy={busy} onClose={(a) => trade(a, SIDE_CLOSE, 0, `Closed ${a}`)} />
+              </div>
+              <div className="seg wide" role="radiogroup" aria-label="Coin">
+                {ASSETS.map((a) => (
+                  <button type="button" key={a} role="radio" aria-checked={a === asset} className={a === asset ? "on" : ""} onClick={() => onAsset(a)}>
+                    {a}
+                  </button>
+                ))}
+              </div>
+              <label className="amount">
+                <span>$</span>
+                <input aria-label="Amount in dollars" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" />
+              </label>
+              <div className="presets">
+                {[0.25, 0.5, 1].map((f) => (
+                  <button type="button" key={f} onClick={() => setAmount(String(Math.floor(room * f)))}>
+                    {f === 1 ? `Max ${kilo(room)}` : `${f * 100}%`}
+                  </button>
+                ))}
+              </div>
+              <input aria-label="Reason, posted on chain" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Reason (on chain)" maxLength={200} />
+              <button className={`btn wide ${buy ? "buy" : "sell"}`} disabled={busy || !canTrade}>
+                {busy ? "Sending…" : `${me ? "" : "Join · "}${verb} ${asset} ${value >= 10 ? usd(value, 0) : ""}`}
+              </button>
+            </form>
+          )}
+          {me && <Positions me={me} book={book} prices={arena.prices.map((p) => p?.price ?? 0)} live={live} busy={busy} onClose={(a) => trade(a, SIDE_CLOSE, 0, `Closed ${a}`)} />}
         </>
       )}
       {note && (
@@ -466,15 +455,17 @@ function Board({ arena, market, marketTo }: { arena: ArenaState; market: (from: 
                       {name}
                     </span>
                   </td>
-                  <td className="chips">
-                    {ASSETS.map((a, i) => {
-                      const v = r.entrant.qty[i] * prices[i];
-                      return Math.abs(v) < 0.5 ? null : (
-                        <span key={a} className={`chip ${v < 0 ? "short" : ""}`}>
-                          {a} {kilo(Math.abs(v))}
-                        </span>
-                      );
-                    })}
+                  <td className="pos">
+                    <div className="chips">
+                      {ASSETS.map((a, i) => {
+                        const v = r.entrant.qty[i] * prices[i];
+                        return Math.abs(v) < 0.5 ? null : (
+                          <span key={a} className={`chip ${v < 0 ? "short" : ""}`}>
+                            {a} {kilo(Math.abs(v))}
+                          </span>
+                        );
+                      })}
+                    </div>
                   </td>
                   <td className="r n">{usd(r.equity)}</td>
                   <td className={`r n ${r.pnlPct >= 0 ? "up" : "down"}`}>{pct(r.pnlPct)}</td>

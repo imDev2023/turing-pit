@@ -41,7 +41,7 @@ function side(e: Entrant | undefined, prices: number[]) {
 }
 
 export function DuelsView({ state, sender, now }: { state: DuelsState; sender: Sender; now: number }) {
-  const me = sender.publicKey;
+  const me = sender.player;
   const mine = me ? state.duels.filter((d) => d.human?.entrant.player.equals(me)) : [];
   const others = state.duels.filter((d) => !me || !d.human?.entrant.player.equals(me)).slice(0, 12);
   const decided = state.duels.filter((d) => d.round.finalized && d.round.winnerEquity > 0);
@@ -92,7 +92,7 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
   const opponent = agent < 0 ? "any agent" : PERSONAS[agent].label;
 
   const start = () => {
-    const player = sender.publicKey;
+    const player = sender.player;
     if (!player || !PROGRAM_ID || !AUTHORITY) return;
     if (!(value >= 10)) return sender.setNote({ ok: false, text: "Minimum $10" });
     const pick = agent < 0 ? Math.floor(random() * PERSONAS.length) : agent;
@@ -174,8 +174,8 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
           ))}
         </div>
         <input aria-label="Reason, posted on chain" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Reason (on chain)" maxLength={200} />
-        <button className={`btn wide ${long ? "buy" : "sell"}`} disabled={sender.busy || !sender.publicKey}>
-          {!sender.publicKey ? "Connect a wallet" : sender.busy ? "Sending…" : `${long ? "Long" : "Short"} ${asset} vs ${opponent}`}
+        <button className={`btn wide ${long ? "buy" : "sell"}`} disabled={sender.busy || !sender.player}>
+          {!sender.player ? "Connect a wallet" : sender.busy ? "Sending…" : `${long ? "Long" : "Short"} ${asset} vs ${opponent}`}
         </button>
       </form>
       {sender.note && (
@@ -215,7 +215,7 @@ function DuelCard({ duel, state, sender, now, mine = false }: { duel: Duel; stat
   else status = countdown(round.endTs - now);
 
   const close = () => {
-    const player = sender.publicKey;
+    const player = sender.player;
     const h = duel.human;
     if (!player || !PROGRAM_ID || !h || !you?.trade) return;
     const reason = `Closing my ${you.trade.asset} ${you.trade.long ? "long" : "short"}`;

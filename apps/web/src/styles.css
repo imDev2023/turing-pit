@@ -932,7 +932,7 @@ input::placeholder {
     height: 320px;
   }
 
-  .board .chips,
+  .board .pos,
   .board th:nth-child(3) {
     display: none;
   }

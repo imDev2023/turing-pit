@@ -1,36 +1,81 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Transaction, type TransactionInstruction } from "@solana/web3.js";
+import { Keypair, LAMPORTS_PER_SOL, SystemProgram, Transaction, type PublicKey, type TransactionInstruction } from "@solana/web3.js";
 import { explainError } from "@turing-pit/sdk";
 
 export type Note = { ok: boolean; text: string; sig?: string };
 
-/** Signs instructions in the wallet and lands them on devnet, whichever network the wallet shows. */
+/** A session wallet per connected wallet, kept in this browser. It plays and signs every trade,
+ *  so the player's own wallet approves once: the first action, which also funds it. */
+const KEY = "turing-pit:session:";
+const TOP_UP = 0.1 * LAMPORTS_PER_SOL;
+const LOW = 0.02 * LAMPORTS_PER_SOL;
+
+function sessionFor(owner: PublicKey): Keypair {
+  const key = KEY + owner.toBase58();
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved) return Keypair.fromSecretKey(Uint8Array.from(atob(saved), (c) => c.charCodeAt(0)));
+    const fresh = Keypair.generate();
+    localStorage.setItem(key, btoa(String.fromCharCode(...fresh.secretKey)));
+    return fresh;
+  } catch {
+    // Without storage the session lasts as long as the page.
+    return Keypair.generate();
+  }
+}
+
+/** Lands instructions on devnet. The session wallet signs and pays; when it runs low, the same
+ *  transaction tops it up from the connected wallet, which is then the one approval needed. */
 export function useSender(onDone?: () => void) {
-  const { publicKey, sendTransaction, signTransaction } = useWallet();
+  const { publicKey: wallet, signTransaction } = useWallet();
   const { connection } = useConnection();
+  const session = useMemo(() => (wallet ? sessionFor(wallet) : null), [wallet]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<Note | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
+
+  useEffect(() => {
+    setBalance(null);
+    if (!session) return;
+    let alive = true;
+    const check = () =>
+      connection
+        .getBalance(session.publicKey, "confirmed")
+        .then((b) => alive && setBalance(b))
+        .catch(() => undefined);
+    check();
+    const t = setInterval(check, 30_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [connection, session]);
 
   const send = async (ixs: TransactionInstruction[], done: string): Promise<boolean> => {
-    if (!publicKey) return false;
+    if (!wallet || !session) return false;
     setBusy(true);
     setNote(null);
     try {
-      const latest = await connection.getLatestBlockhash("confirmed");
-      const tx = new Transaction().add(...ixs);
-      tx.feePayer = publicKey;
+      const [latest, held] = await Promise.all([connection.getLatestBlockhash("confirmed"), connection.getBalance(session.publicKey, "confirmed")]);
+      const fund = held < LOW;
+      const tx = new Transaction();
+      if (fund) tx.add(SystemProgram.transfer({ fromPubkey: wallet, toPubkey: session.publicKey, lamports: TOP_UP - held }));
+      tx.add(...ixs);
+      tx.feePayer = fund ? wallet : session.publicKey;
       tx.recentBlockhash = latest.blockhash;
-      let sig: string;
-      let resend: ReturnType<typeof setInterval> | undefined;
-      if (signTransaction) {
-        // Sent to devnet by the page, and again every two seconds until it lands.
-        const raw = (await signTransaction(tx)).serialize();
-        sig = await connection.sendRawTransaction(raw, { maxRetries: 0 });
-        resend = setInterval(() => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined), 2000);
+      let raw: Uint8Array;
+      if (fund) {
+        if (!signTransaction) throw new Error("This wallet can't sign transactions here");
+        tx.partialSign(session);
+        raw = (await signTransaction(tx)).serialize();
       } else {
-        sig = await sendTransaction(tx, connection);
+        tx.sign(session);
+        raw = tx.serialize();
       }
+      // Sent to devnet by the page, and again every two seconds until it lands.
+      const sig = await connection.sendRawTransaction(raw, { maxRetries: 0 });
+      const resend = setInterval(() => connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => undefined), 2000);
       try {
         const res = await connection.confirmTransaction({ signature: sig, ...latest }, "confirmed");
         if (res.value.err) throw new Error(JSON.stringify(res.value.err));
@@ -38,6 +83,7 @@ export function useSender(onDone?: () => void) {
         clearInterval(resend);
       }
       setNote({ ok: true, text: done, sig });
+      connection.getBalance(session.publicKey, "confirmed").then(setBalance).catch(() => undefined);
       onDone?.();
       return true;
     } catch (e) {
@@ -48,6 +94,16 @@ export function useSender(onDone?: () => void) {
     }
   };
 
-  return { publicKey, send, busy, note, setNote };
+  return {
+    wallet,
+    /** The key that plays: the session wallet of the connected wallet. */
+    player: session?.publicKey ?? null,
+    /** False until the session wallet holds enough for fees: the next action asks the wallet once. */
+    ready: balance !== null && balance >= LOW,
+    send,
+    busy,
+    note,
+    setNote,
+  };
 }
 export type Sender = ReturnType<typeof useSender>;

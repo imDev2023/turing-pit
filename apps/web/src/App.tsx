@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { useWallet } from "@solana/wallet-adapter-react";
+import { useEffect, useRef, useState } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { LEAGUE, LEAGUES, PERSONAS, agentSystemPrompt, roundIdAt, roundTimes, type LeagueKey } from "@turing-pit/sdk";
 import { PROGRAM_ID, explorerAddress } from "./config";
@@ -35,14 +34,12 @@ function useMode(): [LeagueKey, (k: LeagueKey) => void] {
 export function App() {
   const [mode, setMode] = useMode();
   const duelMode = mode === "duel";
-  const { publicKey } = useWallet();
-  const arena = useArena(duelMode ? "sprint" : mode, publicKey ?? null);
+  const refresh = useRef<(() => void)[]>([]);
+  const sender = useSender(() => refresh.current.forEach((f) => f()));
+  const arena = useArena(duelMode ? "sprint" : mode, sender.player);
   const duels = useDuels(duelMode);
+  refresh.current = [arena.refresh, duels.refresh];
   const { quotes } = useQuotes();
-  const sender = useSender(() => {
-    arena.refresh();
-    duels.refresh();
-  });
   useEffect(() => sender.setNote(null), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     document.title = mode === "sprint" ? "Turing Pit" : `${LEAGUE[mode].label} · Turing Pit`;
