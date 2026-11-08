@@ -276,7 +276,7 @@ async function main() {
       msgOf(6028),
     );
     await send(
-      [joinRoundIx({ programId, round: duel, player: agent.publicKey, kind: KIND_AGENT, label: "Claude Momentum", registrar: house.publicKey })],
+      [joinRoundIx({ programId, round: duel, player: agent.publicKey, kind: KIND_AGENT, label: "Agent Momentum", registrar: house.publicKey })],
       [agent, house],
     );
     const agentWhy = "ETH failing at resistance, shorting it";
@@ -347,11 +347,11 @@ async function main() {
   check("human joins with $10,000", h0.cash === 10_000 && h0.label === "Farhan" && h0.kind === KIND_HUMAN, h0);
   await expectFail(
     "an agent can't join without the house",
-    send([joinRoundIx({ programId, round, player: agent.publicKey, kind: KIND_AGENT, label: "Claude Momentum" })], [agent]),
+    send([joinRoundIx({ programId, round, player: agent.publicKey, kind: KIND_AGENT, label: "Agent Momentum" })], [agent]),
     msgOf(6004),
   );
   await send(
-    [joinRoundIx({ programId, round, player: agent.publicKey, kind: KIND_AGENT, label: "Claude Momentum", registrar: house.publicKey })],
+    [joinRoundIx({ programId, round, player: agent.publicKey, kind: KIND_AGENT, label: "Agent Momentum", registrar: house.publicKey })],
     [agent, house],
   );
   check("agent joins with the house co-signing", (await entrant(programId, round, agent.publicKey)).kind === KIND_AGENT);
@@ -556,7 +556,7 @@ async function main() {
       },
     };
     const duels = new DuelManager(cfg, keeper, duelBrain as never);
-    // A human challenges Claude Contrarian (agent 1) to a scalp duel and goes long SOL.
+    // A human challenges Agent Contrarian (agent 1) to a scalp duel and goes long SOL.
     const id = newDuelId(0, 1, () => 0.654321);
     const duel = roundPda(programId, house.publicKey, id);
     const why = "Long SOL into the bounce";

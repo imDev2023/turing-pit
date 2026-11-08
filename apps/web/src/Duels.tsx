@@ -26,6 +26,7 @@ import {
 } from "@turing-pit/sdk";
 import { AUTHORITY, PROGRAM_ID, explorerTx } from "./config";
 import { countdown, pct, price, savedName, usd } from "./format";
+import { Faucet } from "./League";
 import type { Sender } from "./send";
 import type { Duel, DuelsState } from "./useDuels";
 
@@ -89,7 +90,6 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
   const [amount, setAmount] = useState("5000");
   const [why, setWhy] = useState("");
   const value = Math.min(MAX, Number(amount) || 0);
-  const opponent = agent < 0 ? "any agent" : PERSONAS[agent].label;
 
   const start = () => {
     const player = sender.player;
@@ -130,6 +130,7 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
           start();
         }}
       >
+        {sender.short && <Faucet />}
         <div className="seg wide" role="radiogroup" aria-label="Style">
           {DUEL_STYLES.map((s, i) => (
             <button type="button" key={s.key} role="radio" aria-checked={style === i} className={style === i ? "on" : ""} onClick={() => setStyle(i)}>
@@ -140,7 +141,7 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
         <div className="seg wide" role="radiogroup" aria-label="Opponent">
           {PERSONAS.map((p, i) => (
             <button type="button" key={p.label} role="radio" aria-checked={agent === i} className={agent === i ? "on" : ""} onClick={() => setAgent(i)}>
-              {p.label.replace("Claude ", "")}
+              {p.label.replace("Agent ", "")}
             </button>
           ))}
           <button type="button" role="radio" aria-checked={agent < 0} className={agent < 0 ? "on" : ""} onClick={() => setAgent(-1)}>
@@ -175,7 +176,7 @@ function NewDuel({ state, sender }: { state: DuelsState; sender: Sender }) {
         </div>
         <input aria-label="Reason, posted on chain" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Reason (on chain)" maxLength={200} />
         <button className={`btn wide ${long ? "buy" : "sell"}`} disabled={sender.busy || !sender.player}>
-          {!sender.player ? "Connect a wallet" : sender.busy ? "Sending…" : `${long ? "Long" : "Short"} ${asset} vs ${opponent}`}
+          {!sender.player ? "Connect a wallet" : sender.busy ? "Sending…" : "Start duel"}
         </button>
       </form>
       {sender.note && (
@@ -205,7 +206,7 @@ function DuelCard({ duel, state, sender, now, mine = false }: { duel: Duel; stat
   if (round.finalized) {
     if (round.winnerEquity === 0) status = "No trades";
     else if (round.winnerKind === KIND_AGENT) {
-      status = mine ? "Lost" : `${agentName.replace("Claude ", "")} won`;
+      status = mine ? "Lost" : `${agentName.replace("Agent ", "")} won`;
       tone = "machine";
     } else {
       status = mine ? "Won" : `${humanName} won`;
@@ -232,7 +233,7 @@ function DuelCard({ duel, state, sender, now, mine = false }: { duel: Duel; stat
   const row = (name: string, s: ReturnType<typeof side>, ai: boolean, action?: JSX.Element) => (
     <div className={`duel-side ${ai ? "ai" : "human"}`}>
       <span className="who">
-        <i className="mark" aria-label={ai ? "Claude agent" : "Human"} />
+        <i className="mark" aria-label={ai ? "Agent" : "Human"} />
         {name}
       </span>
       <span className="what">

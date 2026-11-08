@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useConnection } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import {
   ASSETS,
   KIND_AGENT,
@@ -236,26 +234,11 @@ function Ticket({
   book: Position[] | null;
   live: boolean;
 }) {
-  const { connection } = useConnection();
   const { wallet, player, busy, note } = sender;
   const [name, setName] = useState(savedName);
   const [amount, setAmount] = useState("1000");
   const [why, setWhy] = useState("");
   const [buy, setBuy] = useState(true);
-  const [sol, setSol] = useState<number | null>(null);
-
-  // The first action also funds the session wallet from this wallet, which needs devnet SOL.
-  useEffect(() => {
-    if (!wallet || sender.ready) return setSol(null);
-    let alive = true;
-    connection
-      .getBalance(wallet)
-      .then((b) => alive && setSol(b / LAMPORTS_PER_SOL))
-      .catch(() => alive && setSol(null));
-    return () => {
-      alive = false;
-    };
-  }, [connection, wallet, sender.ready, note]);
 
   const i = ASSETS.indexOf(asset);
   const mark = arena.prices[i]?.price ?? 0;
@@ -325,11 +308,7 @@ function Ticket({
                 submit();
               }}
             >
-              {sol !== null && sol < 0.11 && (
-                <a className="btn ghost wide" href="https://faucet.solana.com" target="_blank" rel="noreferrer">
-                  Get devnet SOL
-                </a>
-              )}
+              {sender.short && <Faucet />}
               {!me && <input aria-label="Name on the board" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" maxLength={24} />}
               <div className="seg wide" role="radiogroup" aria-label="Side">
                 <button type="button" role="radio" aria-checked={buy} className={buy ? "on buy" : ""} onClick={() => setBuy(true)}>
@@ -377,6 +356,15 @@ function Ticket({
         </p>
       )}
     </section>
+  );
+}
+
+/** Shown while the connected wallet can't fund its session wallet. */
+export function Faucet() {
+  return (
+    <a className="btn ghost wide" href="https://faucet.solana.com" target="_blank" rel="noreferrer">
+      Get devnet SOL
+    </a>
   );
 }
 
@@ -450,8 +438,8 @@ function Board({ arena, market, marketTo }: { arena: ArenaState; market: (from: 
                 <tr key={r.address} className={`${traded ? "" : "idle"} ${ai ? "ai" : "human"}`}>
                   <td className="r n rank">{traded ? rank : "–"}</td>
                   <td>
-                    <span className="who" title={ai ? "Claude agent" : "Human"}>
-                      <i className="mark" aria-label={ai ? "Claude agent" : "Human"} />
+                    <span className="who" title={ai ? "Agent" : "Human"}>
+                      <i className="mark" aria-label={ai ? "Agent" : "Human"} />
                       {name}
                     </span>
                   </td>
@@ -497,7 +485,7 @@ function History({ arena }: { arena: ArenaState }) {
             <li key={r.roundId} className={!r.won ? "" : ai ? "ai" : "human"}>
               <span className="n when">{stamp(r.start, arena.league)}</span>
               <span className="who">
-                {r.won && <i className="mark" aria-label={ai ? "Claude agent" : "Human"} />}
+                {r.won && <i className="mark" aria-label={ai ? "Agent" : "Human"} />}
                 {r.won ? r.winnerLabel : "No trades"}
               </span>
               {r.won && <span className={`n r ${pnl >= 0 ? "up" : "down"}`}>{pct(pnl)}</span>}
@@ -543,7 +531,7 @@ function ReasonItem({ t, now, league }: { t: Thought; now: number; league: strin
     <li className="reason">
       <div className="head">
         <span className="who ai">
-          <i className="mark" aria-label="Claude agent" />
+          <i className="mark" aria-label="Agent" />
           {t.label}
         </span>
         {league && <span className="tag">{league}</span>}

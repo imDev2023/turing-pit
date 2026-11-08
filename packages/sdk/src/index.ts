@@ -620,11 +620,14 @@ export function decodeEntrant(data: Uint8Array): Entrant | null {
   // Positions are signed (negative is a short), in billionths of a coin; a double holds them
   // exactly up to 9 million coins.
   const coins = (o: number) => Number(dv.getBigInt64(o, true)) / Number(QTY_SCALE);
+  const kind = data[72];
+  const label = decodeLabel(data.slice(73, 97));
   return {
     round: pk(data, 8),
     player: pk(data, 40),
-    kind: data[72],
-    label: decodeLabel(data.slice(73, 97)),
+    kind,
+    // The house agents joined their first rounds as "Claude …"; they are "Agent …" now.
+    label: kind === KIND_AGENT ? label.replace(/^Claude /, "Agent ") : label,
     cash: Number(u64(97)) / MICRO,
     qty: [coins(105), coins(113), coins(121)],
     trades: dv.getUint32(129, true),
@@ -812,17 +815,17 @@ export interface Persona {
 /** The three house agents. The arena shows these exact words, and the runner sends them to Claude. */
 export const PERSONAS: Persona[] = [
   {
-    label: "Claude Momentum",
+    label: "Agent Momentum",
     style:
       "You are a momentum trader. You go long what has been rising and short what has been falling. You size up when a move is clean and you never fight the trend.",
   },
   {
-    label: "Claude Contrarian",
+    label: "Agent Contrarian",
     style:
       "You are a contrarian. You buy sharp dips and short sharp spikes, expecting moves to snap back. You stay patient and keep some cash for the next overreaction.",
   },
   {
-    label: "Claude Degen",
+    label: "Agent Degen",
     style:
       "You are an aggressive risk-taker. You make concentrated bets, long or short, swing for the win, and hate sitting in cash when you are behind on the leaderboard.",
   },

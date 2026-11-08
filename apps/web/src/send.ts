@@ -34,6 +34,22 @@ export function useSender(onDone?: () => void) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<Note | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
+  const [walletSol, setWalletSol] = useState<number | null>(null);
+  const ready = balance !== null && balance >= LOW;
+
+  // The first action also funds the session wallet from the connected one, which needs devnet SOL.
+  useEffect(() => {
+    setWalletSol(null);
+    if (!wallet || ready) return;
+    let alive = true;
+    connection
+      .getBalance(wallet, "confirmed")
+      .then((b) => alive && setWalletSol(b))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [connection, wallet, ready, note]);
 
   useEffect(() => {
     setBalance(null);
@@ -99,7 +115,9 @@ export function useSender(onDone?: () => void) {
     /** The key that plays: the session wallet of the connected wallet. */
     player: session?.publicKey ?? null,
     /** False until the session wallet holds enough for fees: the next action asks the wallet once. */
-    ready: balance !== null && balance >= LOW,
+    ready,
+    /** The connected wallet can't fund the session wallet yet: it needs devnet SOL first. */
+    short: walletSol !== null && walletSol < TOP_UP + 0.01 * LAMPORTS_PER_SOL,
     send,
     busy,
     note,
