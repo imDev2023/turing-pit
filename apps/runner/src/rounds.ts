@@ -103,8 +103,25 @@ export class RoundManager {
     }
   }
 
+  /** Points a round at another price source; the program allows it until the round is final. */
+  private async moveRound(found: { address: PublicKey; round: Round }, src: PriceSource): Promise<string> {
+    return sendIxs(
+      this.cfg.connection,
+      [
+        setPriceSourceIx({
+          programId: this.cfg.programId,
+          round: found.address,
+          authority: this.cfg.keys.authority.publicKey,
+          shardId: src.shardId,
+          maxPriceAge: src.maxPriceAge,
+        }),
+      ],
+      [this.cfg.keys.authority],
+    );
+  }
+
   /** Settles every entrant of an ended round, then names its winner. */
-  private async finishRound(roundId: number) {
+  private async finishRound(roundId: number, moved = false): Promise<void> {
     const found = await fetchRound(this.cfg, roundId);
     if (!found) return void this.finished.add(roundId);
     if (found.round.finalized) return void this.finished.add(roundId);
@@ -127,7 +144,24 @@ export class RoundManager {
           { computeUnits: 400_000 },
         );
       } catch (e) {
-        this.complain(roundId, `settle failed in round ${roundId}:`, shortError(e));
+        const why = shortError(e);
+        // A round can end on a source that has since stopped for good (the house's own Pyth
+        // updates did, on 8 November), and it would never settle there. Ten minutes after its end,
+        // it moves to the prices new rounds use, and its open positions are marked at those.
+        const src = this.prices.source();
+        const now = Math.floor(Date.now() / 1000);
+        if (!moved && why.includes("StalePrice") && found.round.shardId !== src.shardId && now >= found.round.endTs + 600) {
+          try {
+            const sig = await this.moveRound(found, src);
+            const at = src.shardId === HOUSE_SHARD ? "the house's prices" : `shard ${src.shardId} prices`;
+            log("rounds", `${leagueOf(roundId).label} round ${roundId} ended on prices that have stopped; it settles at ${at} instead`, sig);
+            return this.finishRound(roundId, true);
+          } catch (moveError) {
+            this.complain(roundId, `moving round ${roundId} to shard ${src.shardId} failed:`, shortError(moveError));
+            return;
+          }
+        }
+        this.complain(roundId, `settle failed in round ${roundId}:`, why);
         return; // try again on the next pass, once prices are fresh
       }
     }
@@ -263,19 +297,7 @@ export class RoundManager {
       if (!found || found.round.finalized || now >= found.round.endTs) continue;
       if (found.round.shardId === src.shardId && found.round.maxPriceAge === src.maxPriceAge) continue;
       try {
-        const sig = await sendIxs(
-          this.cfg.connection,
-          [
-            setPriceSourceIx({
-              programId: this.cfg.programId,
-              round: found.address,
-              authority: this.cfg.keys.authority.publicKey,
-              shardId: src.shardId,
-              maxPriceAge: src.maxPriceAge,
-            }),
-          ],
-          [this.cfg.keys.authority],
-        );
+        const sig = await this.moveRound(found, src);
         const at = src.shardId === HOUSE_SHARD ? "the house's prices" : `shard ${src.shardId} prices`;
         log("rounds", `${league.label} round ${roundId} now fills at ${at} up to ${src.maxPriceAge}s old`, sig);
       } catch (e) {

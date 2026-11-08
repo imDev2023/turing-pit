@@ -18,6 +18,7 @@ async function main() {
   log("main", `program ${cfg.programId.toBase58()}`);
   log("main", `house ${cfg.keys.authority.publicKey.toBase58()}`);
   log("main", `running until ${new Date(until).toISOString()}`);
+  log("main", `agents decide with ${cfg.agentModel}`);
 
   const program = await cfg.connection.getAccountInfo(cfg.programId);
   if (!program?.executable) {

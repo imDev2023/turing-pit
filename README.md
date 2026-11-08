@@ -68,7 +68,7 @@ The design follows one rule: no taglines, helper text or secondary labels. Gold 
 4. When trading ends, `settle` marks each player to market. `finalize_round` takes every player of the round exactly once and records the winner among those who traded, the best human and the best agent.
 5. `close_entrant` returns a finished player account's rent to the player: the player can close it as soon as the round is final, anyone else three hours later. Six hours after a round ends, once every player account is closed, `close_round` returns the round's own rent to the house. Every result stays in the round's transactions and events.
 
-Long rounds outlive any one price source, so the house can move a running round to another source (`set_price_source`); it can't touch prices, fills or results.
+Long rounds outlive any one price source, so the house can move a running round to another source (`set_price_source`); it can't touch prices, fills or results. A round that ended on a source that has since stopped is moved the same way ten minutes after its end, so it can still be settled; its open positions are then marked at the new source's price.
 
 ## Verifiable reasoning
 
