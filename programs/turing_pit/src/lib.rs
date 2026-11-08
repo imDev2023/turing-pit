@@ -78,6 +78,21 @@ pub const CLOSE_DELAY_SECS: i64 = 3 * 60 * 60;
 /// round ends, once every player's account is closed. The arena shows the last six hours.
 pub const ROUND_CLOSE_DELAY_SECS: i64 = 6 * 60 * 60;
 
+/// Duels are rounds a player opens against one of the house's agents: one trade each, and the
+/// trade that returns more wins. Their ids run from `DUEL_BASE` for 2^40 ids (league 6 in the
+/// client's scheme), with the style in bits 36-37.
+pub const DUEL_BASE: u64 = 6 << 40;
+/// How long a duel trade may stay open, by style: scalp, swing, long-term.
+pub const DUEL_SECS: [i64; 3] = [15 * 60, 7 * 86_400, 30 * 86_400];
+/// Each side's stake: $10,000 of paper cash, in micro-USD.
+pub const DUEL_CASH: u64 = 10_000_000_000;
+pub const DUEL_FEE_BPS: u16 = 10;
+
+/// True for a duel's round.
+pub fn is_duel(round: &Round) -> bool {
+    round.round_id >= DUEL_BASE && round.round_id - DUEL_BASE < (1 << 40)
+}
+
 #[program]
 pub mod turing_pit {
     use super::*;
@@ -172,6 +187,67 @@ pub mod turing_pit {
         Ok(())
     }
 
+    /// Opens a duel: the player against one of the house's agents, one trade each. The style
+    /// caps how long a trade may stay open; each side closes its trade when it likes, and the
+    /// round is decided as soon as both have (or at the cap, at the closing price). Anyone can
+    /// open one, paying its rent; the round belongs to the house's arena, whose agents answer.
+    pub fn open_duel(
+        ctx: Context<OpenDuel>,
+        round_id: u64,
+        style: u8,
+        shard_id: u16,
+        max_price_age: u16,
+    ) -> Result<()> {
+        require!((style as usize) < DUEL_SECS.len(), PitError::BadParams);
+        require!(
+            round_id >= DUEL_BASE
+                && round_id - DUEL_BASE < (1 << 40)
+                && (round_id >> 36) & 3 == style as u64,
+            PitError::BadParams
+        );
+        require!(
+            (MIN_PRICE_AGE..=MAX_PRICE_AGE).contains(&max_price_age),
+            PitError::BadParams
+        );
+        let now = Clock::get()?.unix_timestamp;
+        let end_ts = now + DUEL_SECS[style as usize];
+
+        let round = &mut ctx.accounts.round;
+        round.authority = ctx.accounts.authority.key();
+        round.round_id = round_id;
+        round.start_ts = now;
+        round.end_ts = end_ts;
+        round.start_cash = DUEL_CASH;
+        round.fee_bps = DUEL_FEE_BPS;
+        // One trade, so it may use the whole stake.
+        round.max_asset_bps = 10_000;
+        round.shard_id = shard_id;
+        for (i, feed) in FEED_IDS.iter().enumerate() {
+            round.feeds[i] = price_feed_account(shard_id, feed);
+        }
+        round.entrants = 0;
+        round.agents = 0;
+        round.settled = 0;
+        round.finalized = false;
+        round.winner = Pubkey::default();
+        round.winner_equity = 0;
+        round.winner_kind = 0;
+        round.best_human_equity = 0;
+        round.best_agent_equity = 0;
+        round.bump = ctx.bumps.round;
+        round.max_price_age = max_price_age;
+        round.closed = 0;
+
+        emit!(RoundCreated {
+            round: round.key(),
+            round_id,
+            start_ts: now,
+            end_ts,
+            start_cash: DUEL_CASH,
+        });
+        Ok(())
+    }
+
     /// Joins a round with the round's starting cash. Agents must be co-signed by the house.
     pub fn join_round(ctx: Context<JoinRound>, kind: u8, label: [u8; 24]) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
@@ -180,11 +256,21 @@ pub mod turing_pit {
         let round = &mut ctx.accounts.round;
 
         require!(now < round.end_ts - JOIN_CUTOFF_SECS, PitError::RoundClosed);
-        require!(
-            round.entrants < MAX_ENTRANTS || round.end_ts - round.start_ts > OPEN_ROUND_SECS,
-            PitError::RoundFull
-        );
         require!(kind == KIND_HUMAN || kind == KIND_AGENT, PitError::BadParams);
+        if is_duel(round) {
+            // One player and one agent.
+            let taken = if kind == KIND_AGENT {
+                round.agents
+            } else {
+                round.entrants - round.agents
+            };
+            require!(taken == 0, PitError::DuelSeatTaken);
+        } else {
+            require!(
+                round.entrants < MAX_ENTRANTS || round.end_ts - round.start_ts > OPEN_ROUND_SECS,
+                PitError::RoundFull
+            );
+        }
         if kind == KIND_AGENT {
             let registrar = ctx
                 .accounts
@@ -253,6 +339,14 @@ pub mod turing_pit {
             now >= round.start_ts && now < round.end_ts,
             PitError::RoundNotLive
         );
+        if is_duel(round) {
+            // One trade each: it opens with a buy or a sell, then it can only be closed, once.
+            let trades = ctx.accounts.entrant.trades;
+            require!(
+                (trades == 0 && side != SIDE_CLOSE) || (trades == 1 && side == SIDE_CLOSE),
+                PitError::DuelOneTrade
+            );
+        }
         let prices = load_prices(
             round,
             [
@@ -343,22 +437,30 @@ pub mod turing_pit {
         Ok(())
     }
 
-    /// Marks one entrant to market after the round ends. Anyone can call it.
+    /// Marks one entrant to market after the round ends, or in a duel as soon as the entrant
+    /// has closed its trade. Anyone can call it. A flat account is worth its cash, so it
+    /// settles without reading prices.
     pub fn settle(ctx: Context<Settle>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
+        let flat = ctx.accounts.entrant.qty.iter().all(|q| *q == 0);
+        let closed_duel = is_duel(&ctx.accounts.round) && ctx.accounts.entrant.trades >= 2;
         let prices = {
             let round = &ctx.accounts.round;
-            require!(now >= round.end_ts, PitError::RoundNotOver);
-            load_prices(
-                round,
-                [
-                    &ctx.accounts.price_sol.to_account_info(),
-                    &ctx.accounts.price_btc.to_account_info(),
-                    &ctx.accounts.price_eth.to_account_info(),
-                ],
-                now,
-                None,
-            )?
+            require!(now >= round.end_ts || closed_duel, PitError::RoundNotOver);
+            if flat {
+                [0u64; NUM_ASSETS]
+            } else {
+                load_prices(
+                    round,
+                    [
+                        &ctx.accounts.price_sol.to_account_info(),
+                        &ctx.accounts.price_btc.to_account_info(),
+                        &ctx.accounts.price_eth.to_account_info(),
+                    ],
+                    now,
+                    None,
+                )?
+            }
         };
         let entrant_key = ctx.accounts.entrant.key();
         let entrant = &mut ctx.accounts.entrant;
@@ -381,12 +483,14 @@ pub mod turing_pit {
 
     /// Names the winner once every entrant is settled. Anyone can call it, but it must be
     /// given every entrant of the round, each once. Only players who traded can win or place;
-    /// when nobody traded, the round has no winner.
+    /// when nobody traded, the round has no winner. A duel is decided as soon as both of its
+    /// trades are closed and settled; otherwise a round is decided after it ends.
     pub fn finalize_round(ctx: Context<FinalizeRound>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let round_key = ctx.accounts.round.key();
         let round = &mut ctx.accounts.round;
-        require!(now >= round.end_ts, PitError::RoundNotOver);
+        let decided = is_duel(round) && round.entrants == 2 && round.settled == 2;
+        require!(now >= round.end_ts || decided, PitError::RoundNotOver);
         require!(!round.finalized, PitError::AlreadyFinalized);
         require!(
             ctx.remaining_accounts.len() as u32 == round.entrants,
@@ -555,6 +659,25 @@ pub struct CreateRound<'info> {
     pub round: Account<'info, Round>,
     #[account(mut)]
     pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(round_id: u64)]
+pub struct OpenDuel<'info> {
+    #[account(
+        init,
+        payer = player,
+        space = 8 + Round::INIT_SPACE,
+        seeds = [b"round", authority.key().as_ref(), &round_id.to_le_bytes()],
+        bump
+    )]
+    pub round: Account<'info, Round>,
+    /// CHECK: the house whose arena the duel is in; only recorded on the round (its agents
+    /// answer duels on rounds under its address).
+    pub authority: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub player: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -808,6 +931,10 @@ pub enum PitError {
     RoundTooRecent,
     #[msg("Your equity is gone: you can only close or reduce positions")]
     Bust,
+    #[msg("In a duel you open one trade, then close it")]
+    DuelOneTrade,
+    #[msg("This duel already has its player and its agent")]
+    DuelSeatTaken,
 }
 
 #[cfg(test)]

@@ -1,9 +1,11 @@
-// The house: keeps Pyth prices fresh, opens and closes rounds, and runs the AI agents.
+// The house: keeps Pyth prices fresh, opens and closes rounds, runs the AI agents and has them
+// answer players' duels.
 // Runs for DURATION_MIN minutes and exits, so a house shift (scripts/house-shift.sh) can hand over
 // cleanly. Exit code 3 means the program isn't deployed yet, so there is nothing to run.
 
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { makeAgents } from "./agents.js";
+import { DuelManager } from "./duels.js";
 import { loadConfig, log } from "./config.js";
 import { PriceKeeper } from "./keeper.js";
 import { RoundManager } from "./rounds.js";
@@ -27,12 +29,13 @@ async function main() {
   const keeper = new PriceKeeper(cfg);
   const rounds = new RoundManager(cfg, keeper);
   const agents = makeAgents(cfg, keeper);
+  const duels = new DuelManager(cfg, keeper);
 
   const keeping = keeper.run(until);
   // With a Pyth API key, give the keeper a moment to post, so new rounds use its fresh prices.
   await keeper.ready(45_000);
   log("main", keeper.posting ? "the keeper is posting fresh Pyth prices" : "rounds will use Pyth's sponsored devnet feeds");
-  await Promise.all([keeping, rounds.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
+  await Promise.all([keeping, rounds.run(until), duels.run(until), ...agents.map((a, i) => a.run(until, 10_000 + i * 15_000))]);
   log("main", "done");
 }
 

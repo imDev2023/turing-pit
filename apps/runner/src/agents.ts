@@ -83,6 +83,8 @@ const CADENCE_MS: Record<LeagueKey, number> = {
   week: 4 * 3_600_000,
   month: 12 * 3_600_000,
   open: 6 * 3_600_000,
+  // Duels pace themselves by style (duels.ts).
+  duel: 60_000,
 };
 
 const fmt = (n: number, d = 2) => n.toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d });

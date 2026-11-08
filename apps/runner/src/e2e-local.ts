@@ -30,6 +30,8 @@ import {
   decodePriceUpdate,
   decodeRound,
   decodeTradeData,
+  duelAgent,
+  duelStyle,
   entrantPda,
   equityOf,
   explainError,
@@ -38,6 +40,8 @@ import {
   hexToBytes,
   joinRoundIx,
   memoIx,
+  newDuelId,
+  openDuelIx,
   reasonHash,
   replayFills,
   ROUND_CLOSE_DELAY_SECONDS,
@@ -49,6 +53,7 @@ import {
   type Entrant,
 } from "@turing-pit/sdk";
 import { Agent, PERSONAS } from "./agents.js";
+import { DuelManager } from "./duels.js";
 import type { Config } from "./config.js";
 import { houseKeys } from "./keys.js";
 import type { PriceKeeper } from "./keeper.js";
@@ -236,6 +241,72 @@ async function main() {
       [human],
     );
     check("and trades fill there, a short included", (await entrant(programId, week, human.publicKey)).qty[1] < 0);
+  }
+
+  console.log("duels");
+  {
+    // Ids carry the style and the agent; the random part is fixed here so reruns differ only by validator.
+    const id = newDuelId(0, 0, () => 0.123456);
+    const duel = roundPda(programId, house.publicKey, id);
+    await expectFail(
+      "a duel's id must carry its style",
+      send([openDuelIx({ programId, authority: house.publicKey, player: human.publicKey, roundId: newDuelId(1, 0, () => 0.5), style: 0 })], [human]),
+      msgOf(6001),
+    );
+    const why = "SOL bounced off the low, riding it";
+    await send(
+      [
+        openDuelIx({ programId, authority: house.publicKey, player: human.publicKey, roundId: id, style: 0 }),
+        joinRoundIx({ programId, round: duel, player: human.publicKey, kind: KIND_HUMAN, label: "Farhan" }),
+        memoIx(why),
+        tradeIx({ programId, round: duel, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 5000, reasonHash: reasonHash(why) }),
+      ],
+      [human],
+      400_000,
+    );
+    const d0 = decodeRound((await connection.getAccountInfo(duel))!.data)!;
+    check(
+      "a player opens a scalp duel and its trade in one transaction",
+      d0.endTs - d0.startTs === 15 * 60 && d0.entrants === 1 && d0.startCash === 10_000 && duelStyle(d0.roundId) === 0 && duelAgent(d0.roundId) === 0,
+      d0,
+    );
+    await expectFail(
+      "a second human can't take the agent's seat",
+      send([joinRoundIx({ programId, round: duel, player: trader.publicKey, kind: KIND_HUMAN, label: "Other" })], [trader]),
+      msgOf(6028),
+    );
+    await send(
+      [joinRoundIx({ programId, round: duel, player: agent.publicKey, kind: KIND_AGENT, label: "Claude Momentum", registrar: house.publicKey })],
+      [agent, house],
+    );
+    const agentWhy = "ETH failing at resistance, shorting it";
+    await send(
+      [memoIx(agentWhy), tradeIx({ programId, round: duel, player: agent.publicKey, asset: "ETH", side: SIDE_SELL, usd: 3000, reasonHash: reasonHash(agentWhy) })],
+      [agent],
+    );
+    const tradeIn = (who: Keypair, asset: (typeof ASSETS)[number], side: number, usd: number) => [
+      memoIx("duel"),
+      tradeIx({ programId, round: duel, player: who.publicKey, asset, side, usd, reasonHash: reasonHash("duel") }),
+    ];
+    await expectFail("a duel is one trade: no second one", send(tradeIn(human, "BTC", SIDE_BUY, 1000), [human]), msgOf(6027));
+    const pair = [entrantPda(programId, duel, human.publicKey), entrantPda(programId, duel, agent.publicKey)];
+    const settleOf = (who: Keypair) => settleIx({ programId, round: duel, entrant: entrantPda(programId, duel, who.publicKey) });
+    await expectFail("an open duel can't be decided", send([finalizeRoundIx({ programId, round: duel, entrants: pair })], [house]), msgOf(6006));
+    await send([...tradeIn(human, "SOL", SIDE_CLOSE, 0), settleOf(human)], [human]);
+    const hd = await entrant(programId, duel, human.publicKey);
+    check("closing your duel trade settles it at once", hd.settled && hd.trades === 2 && hd.qty.every((q) => q === 0), hd);
+    await expectFail("and nothing more can be traded", send(tradeIn(human, "SOL", SIDE_BUY, 100), [human]), msgOf(6027));
+    await expectFail("while the agent's trade is open the duel waits", send([finalizeRoundIx({ programId, round: duel, entrants: pair })], [house]), msgOf(6006));
+    await send([...tradeIn(agent, "ETH", SIDE_CLOSE, 0), settleOf(agent)], [agent]);
+    await send([finalizeRoundIx({ programId, round: duel, entrants: pair })], [house]);
+    const d1 = decodeRound((await connection.getAccountInfo(duel))!.data)!;
+    check("both trades closed: the duel is decided before its time is up", d1.finalized && (await chainTime()) < d1.endTs, d1);
+    // The human's $5,000 of SOL there and back cost $10 in fees; the agent's $3,000 short, $6.
+    check(
+      "the better trade wins",
+      d1.winner.equals(agent.publicKey) && d1.winnerKind === KIND_AGENT && Math.abs(d1.winnerEquity - 9_994) < 0.01 && Math.abs(hd.finalEquity - 9_990.005) < 0.01,
+      { winner: d1.winner.toBase58(), equity: d1.winnerEquity, human: hd.finalEquity },
+    );
   }
 
   console.log("create_round");
@@ -468,6 +539,65 @@ async function main() {
     agentIntervalMs: 0,
     pythTreasuryId: undefined,
   } satisfies Config;
+  const keeper = { latest: (asset: string) => PRICES[ASSETS.indexOf(asset as never)], change: () => 0.42, age: () => 5 } as unknown as PriceKeeper;
+
+  console.log("duel runner");
+  {
+    let duelPrompt = "";
+    const duelBrain = {
+      messages: {
+        create: async (req: { messages: { content: string }[] }) => {
+          duelPrompt = req.messages[0].content;
+          const input = duelPrompt.includes("Open your trade now")
+            ? { action: "short", asset: "ETH", usd: 3000, reason: "Stub brain: ETH lagging, shorting it" }
+            : { action: "close", reason: "Stub brain: taking it" };
+          return { content: [{ type: "tool_use", input }] };
+        },
+      },
+    };
+    const duels = new DuelManager(cfg, keeper, duelBrain as never);
+    // A human challenges Claude Contrarian (agent 1) to a scalp duel and goes long SOL.
+    const id = newDuelId(0, 1, () => 0.654321);
+    const duel = roundPda(programId, house.publicKey, id);
+    const why = "Long SOL into the bounce";
+    await send(
+      [
+        openDuelIx({ programId, authority: house.publicKey, player: human.publicKey, roundId: id, style: 0 }),
+        joinRoundIx({ programId, round: duel, player: human.publicKey, kind: KIND_HUMAN, label: "Farhan" }),
+        memoIx(why),
+        tradeIx({ programId, round: duel, player: human.publicKey, asset: "SOL", side: SIDE_BUY, usd: 4000, reasonHash: reasonHash(why) }),
+      ],
+      [human],
+      400_000,
+    );
+    const agentOf = async () => (await fetchEntrants(cfg, duel)).find((e) => e.entrant.player.equals(keys.agents[1].publicKey));
+    await duels.pass();
+    check("the agent named in the duel accepts it", !!(await agentOf()));
+    await duels.pass();
+    const opened = await agentOf();
+    check("and opens its own trade", opened?.entrant.trades === 1 && (opened?.entrant.qty[2] ?? 0) < 0, opened?.entrant.qty);
+    check("the duel prompt shows the challenger's trade", duelPrompt.includes("Farhan's trade: long SOL $4,000"), duelPrompt);
+    duels.lookedAt.clear();
+    await duels.pass();
+    const closed = await agentOf();
+    check("then closes it when its call says so, settling at once", !!closed?.entrant.settled && closed.entrant.trades === 2, closed?.entrant);
+    await send(
+      [
+        memoIx("done"),
+        tradeIx({ programId, round: duel, player: human.publicKey, asset: "SOL", side: SIDE_CLOSE, usd: 0, reasonHash: reasonHash("done") }),
+        settleIx({ programId, round: duel, entrant: entrantPda(programId, duel, human.publicKey) }),
+      ],
+      [human],
+    );
+    await duels.pass();
+    const decided = decodeRound((await connection.getAccountInfo(duel))!.data)!;
+    check(
+      "the house decides the duel as soon as both trades are closed",
+      decided.finalized && decided.winner.equals(keys.agents[1].publicKey),
+      { finalized: decided.finalized, winner: decided.winner.toBase58() },
+    );
+  }
+
   const secondsIn = Math.floor(Date.now() / 1000) % 900;
   if (secondsIn > 840 - 75) {
     console.log("  skip  runner checks: too close to the end of the current 15-minute round");
@@ -480,7 +610,6 @@ async function main() {
   const live = await connection.getAccountInfo(roundPda(programId, house.publicKey, current));
   check("the house opens the current round", !!live && decodeRound(live.data)?.roundId === current);
 
-  const keeper = { latest: (asset: string) => PRICES[ASSETS.indexOf(asset as never)], change: () => 0.42, age: () => 5 } as unknown as PriceKeeper;
   let prompt = "";
   const brain = {
     messages: {

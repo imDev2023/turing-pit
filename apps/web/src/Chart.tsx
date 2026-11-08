@@ -52,14 +52,14 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: token("--chalk-dim"),
-        fontFamily: token("--text"),
+        textColor: token("--muted"),
+        fontFamily: token("--font"),
         fontSize: 12,
         attributionLogo: true,
       },
-      grid: { vertLines: { color: "rgba(43, 63, 134, 0.35)" }, horzLines: { color: "rgba(43, 63, 134, 0.35)" } },
-      rightPriceScale: { borderColor: token("--rule") },
-      timeScale: { borderColor: token("--rule"), timeVisible: true, secondsVisible: false, rightOffset: 6 },
+      grid: { vertLines: { color: "rgba(255, 255, 255, 0.04)" }, horzLines: { color: "rgba(255, 255, 255, 0.04)" } },
+      rightPriceScale: { borderColor: token("--line") },
+      timeScale: { borderColor: token("--line"), timeVisible: true, secondsVisible: false, rightOffset: 6 },
       crosshair: { mode: CrosshairMode.Normal },
     });
     const up = token("--up");
@@ -131,7 +131,7 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
   // The round's trades, on the candle they happened in.
   useEffect(() => {
     if (!markers.current) return;
-    const color = { me: token("--human"), agent: token("--machine"), human: token("--chalk") };
+    const color = { me: token("--human"), agent: token("--machine"), human: token("--text") };
     // Only on candles the chart has: a trade in a minute with no candle yet waits for its tick.
     const newest = last.current?.time ?? 0;
     const list: SeriesMarker<Time>[] = marks
@@ -175,7 +175,7 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
     <div className="chart">
       <div ref={box} className="chart-canvas" />
       {state !== "ok" && (
-        <p className="chart-state">{state === "loading" ? "Loading candles…" : "Couldn't reach Coinbase for candles. Trying again…"}</p>
+        <p className="chart-state">{state === "loading" ? "Loading" : "Chart unavailable"}</p>
       )}
     </div>
   );

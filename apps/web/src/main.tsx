@@ -6,7 +6,6 @@ import ReactDOM from "react-dom/client";
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
-import "@fontsource-variable/big-shoulders-display";
 import "@fontsource-variable/instrument-sans";
 import "./styles.css";
 import { App } from "./App";

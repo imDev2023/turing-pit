@@ -73,6 +73,7 @@ const IX = {
   closeEntrant: disc("global:close_entrant"),
   closeRound: disc("global:close_round"),
   setPriceSource: disc("global:set_price_source"),
+  openDuel: disc("global:open_duel"),
 };
 const ACCOUNT = {
   round: disc("account:Round"),
@@ -133,7 +134,7 @@ export function feedAccounts(shardId = SHARD_ID): [PublicKey, PublicKey, PublicK
 
 // ---------- leagues ----------
 
-export type LeagueKey = "sprint" | "hour" | "day" | "week" | "month" | "open";
+export type LeagueKey = "sprint" | "hour" | "day" | "week" | "month" | "open" | "duel";
 export interface League {
   key: LeagueKey;
   id: number;
@@ -155,7 +156,10 @@ export const LEAGUES: League[] = [
   { key: "month", id: 4, label: "1 month", noun: "1-month", seconds: 30 * 86_400 },
   { key: "open", id: 5, label: "Open", noun: "open-ended", seconds: null },
 ];
-export const LEAGUE = Object.fromEntries(LEAGUES.map((l) => [l.key, l])) as Record<LeagueKey, League>;
+/** Duels are not a league with a schedule: a player opens each one (see `openDuelIx`). They
+ *  take the next id range, so every round still tells what it is from its id alone. */
+export const DUELS: League = { key: "duel", id: 6, label: "Duels", noun: "duel", seconds: null };
+export const LEAGUE = Object.fromEntries([...LEAGUES, DUELS].map((l) => [l.key, l])) as Record<LeagueKey, League>;
 
 const LEAGUE_BASE = 2 ** 40;
 /** Trading stops this long before a period ends, so settling never overlaps the next round. */
@@ -167,6 +171,7 @@ export const OPEN_START = Date.UTC(2026, 10, 8) / 1000;
 export const OPEN_SECONDS = 3_650 * 86_400;
 
 export function leagueOf(roundId: number): League {
+  if (isDuel(roundId)) return DUELS;
   return roundId < LEAGUE_BASE ? LEAGUE.sprint : (LEAGUES[Math.floor(roundId / LEAGUE_BASE)] ?? LEAGUE.sprint);
 }
 
@@ -188,6 +193,8 @@ export function roundIdAt(unixSeconds: number, league: LeagueKey = "sprint"): nu
     }
     case "open":
       return base;
+    case "duel":
+      throw new Error("duels have no schedule: each has its own id (newDuelId)");
   }
 }
 
@@ -220,8 +227,45 @@ export function roundTimes(roundId: number): { start: number; end: number; next:
       break;
     case "open":
       return { start: OPEN_START, end: OPEN_START + OPEN_SECONDS, next: Infinity };
+    case "duel":
+      throw new Error("a duel's times are on its round account");
   }
   return { start, end: next - SETTLE_SECONDS, next };
+}
+
+// ---------- duels ----------
+
+/** One trade each against a house agent; the style caps how long the trade may stay open. */
+export const DUEL_STYLES = [
+  { key: "scalp", label: "Scalp", seconds: 15 * 60, limit: "15 minutes" },
+  { key: "swing", label: "Swing", seconds: 7 * 86_400, limit: "7 days" },
+  { key: "long", label: "Long-term", seconds: 30 * 86_400, limit: "30 days" },
+] as const;
+export const DUEL_BASE = 6 * LEAGUE_BASE;
+export const DUEL_CASH = 10_000;
+
+export function isDuel(roundId: number): boolean {
+  return roundId >= DUEL_BASE && roundId - DUEL_BASE < LEAGUE_BASE;
+}
+/** A duel id: the style in bits 36-37, the challenged agent (its index in PERSONAS) in bits
+ *  34-35, and 34 random bits. */
+export function newDuelId(style: number, agent: number, random: () => number = Math.random): number {
+  return DUEL_BASE + style * 2 ** 36 + agent * 2 ** 34 + Math.floor(random() * 2 ** 34);
+}
+export const duelStyle = (roundId: number): number => Math.floor((roundId - DUEL_BASE) / 2 ** 36) % 4;
+export const duelAgent = (roundId: number): number => Math.floor((roundId - DUEL_BASE) / 2 ** 34) % 4;
+
+/** A player's one duel trade, read back from their account: the program keeps the coins and the
+ *  cash, so the entry price follows from what the trade cost, its 0.1% fee included. */
+export function duelTrade(e: Pick<Entrant, "cash" | "qty">): { asset: Asset; long: boolean; coins: number; entry: number; size: number } | null {
+  const i = e.qty.findIndex((q) => Math.abs(q) > 1e-12);
+  if (i < 0) return null;
+  const coins = Math.abs(e.qty[i]);
+  const long = e.qty[i] > 0;
+  const fee = FEE_BPS / 10_000;
+  // A buy spends `size` of cash with the fee out of it; a sell brings in its proceeds less the fee.
+  const size = long ? DUEL_CASH - e.cash : (e.cash - DUEL_CASH) / (1 - fee);
+  return { asset: ASSETS[i], long, coins, entry: long ? (size * (1 - fee)) / coins : size / coins, size };
 }
 
 // ---------- instructions ----------
@@ -295,6 +339,35 @@ export function createRoundIx(args: {
       u64le(args.startCash ?? START_CASH),
       u16le(args.feeBps ?? FEE_BPS),
       u16le(args.maxAssetBps ?? MAX_ASSET_BPS),
+      u16le(args.shardId ?? SHARD_ID),
+      u16le(args.maxPriceAge ?? PRICE_AGE_KEEPER),
+    ),
+  });
+}
+
+/** Opens a duel under the house's address; the player pays its rent. */
+export function openDuelIx(args: {
+  programId: PublicKey;
+  authority: PublicKey;
+  player: PublicKey;
+  roundId: number;
+  style: number;
+  shardId?: number;
+  maxPriceAge?: number;
+}): TransactionInstruction {
+  const round = roundPda(args.programId, args.authority, args.roundId);
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [
+      meta(round, false, true),
+      meta(args.authority, false, false),
+      meta(args.player, true, true),
+      meta(SystemProgram.programId, false, false),
+    ],
+    data: concat(
+      IX.openDuel,
+      u64le(args.roundId),
+      Uint8Array.of(args.style),
       u16le(args.shardId ?? SHARD_ID),
       u16le(args.maxPriceAge ?? PRICE_AGE_KEEPER),
     ),
@@ -709,6 +782,8 @@ export const PIT_ERRORS = [
   "Every player's account must be closed first",
   "A round can be closed six hours after it ends",
   "Your equity is gone: you can only close or reduce positions",
+  "In a duel you open one trade, then close it",
+  "This duel already has its player and its agent",
 ];
 
 /** Turns a transaction error into something a player can read. */

@@ -27,10 +27,13 @@ export const INTERVALS = [
 ] as const;
 
 const iso = (t: number) => new Date(t * 1000).toISOString();
+/** Coinbase lets candle responses be cached for five minutes, which would show a stale chart or
+ *  an empty minute that has since filled in; a throwaway parameter asks for fresh ones. */
+const fresh = () => `&_=${Date.now()}`;
 
 /** The latest 300 candles of a coin, oldest first. */
 export async function fetchCandles(asset: Asset, seconds: number): Promise<Candle[]> {
-  const res = await fetch(`${REST}/products/${PRODUCT[asset]}/candles?granularity=${seconds}`);
+  const res = await fetch(`${REST}/products/${PRODUCT[asset]}/candles?granularity=${seconds}${fresh()}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`Coinbase candles: HTTP ${res.status}`);
   const rows = (await res.json()) as number[][];
   return rows
@@ -46,12 +49,11 @@ export function priceAt(asset: Asset, t: number): Promise<number | null> {
   const key = `${asset}:${minute}`;
   let p = opens.get(key);
   if (!p) {
-    p = fetch(`${REST}/products/${PRODUCT[asset]}/candles?granularity=60&start=${iso(minute)}&end=${iso(minute + 60)}`)
+    p = fetch(`${REST}/products/${PRODUCT[asset]}/candles?granularity=60&start=${iso(minute - 60)}&end=${iso(minute + 120)}${fresh()}`, {
+      cache: "no-store",
+    })
       .then((r) => (r.ok ? (r.json() as Promise<number[][]>) : []))
-      .then((rows) => {
-        const row = rows.find((x) => x[0] === minute) ?? rows[rows.length - 1];
-        return row ? row[3] : null;
-      })
+      .then((rows) => rows.find((x) => x[0] === minute)?.[3] ?? null)
       .catch(() => null);
     opens.set(key, p);
     // A failed lookup is tried again next time it is asked for.

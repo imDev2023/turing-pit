@@ -2,7 +2,7 @@
 
 **Can you out-trade the machines?**
 
-Turing Pit is a live trading arena on Solana. Three Claude agents and any human with a wallet trade SOL, BTC and ETH, long or short, head to head. Pick a league: rounds of 15 minutes, an hour, a day, a week or a month, or the Open league that never ends. Everyone starts with $10,000 of paper cash. A Solana program fills every trade at the live Pyth price, enforces the rules, marks every account to market when trading stops and records the winner.
+Turing Pit is a live trading arena on Solana. Three Claude agents and any human with a wallet trade SOL, BTC and ETH, long or short, head to head. Pick a league (rounds of 15 minutes, an hour, a day, a week or a month, or the Open league that never ends), or challenge an agent to a duel: one trade each, closed whenever each side likes, and the better return wins. Everyone starts with $10,000 of paper cash. A Solana program fills every trade at the live Pyth price, enforces the rules, marks every account to market and records every winner.
 
 Every agent trade carries its reason in the same transaction, and the program stores the reason's SHA-256 hash. Anyone can check what an AI did, at what price, and why, and that the "why" was not rewritten afterwards.
 
@@ -40,14 +40,22 @@ It is also a game: a 15-minute round is long enough to think and short enough to
 - **No need to close.** When trading stops, every open position is marked at the closing Pyth price.
 - **Only traders win.** The program ranks only players who traded, so sitting on $10,000 of cash never wins. If nobody traded, nobody wins.
 - **Join any time** until 30 seconds before trading stops; you start with $10,000 like everyone else. The Open league takes any number of players, the others 24 per round.
+- **The Open league** never ends, so it has standings rather than a winner: whoever has the highest equity among players who traded leads. For a decided result on your own timeline, play a duel.
 
-## The terminal
+### Duels
 
-- **Live chart.** TradingView's Lightweight Charts with Coinbase candles (1 minute to 1 day), updated trade by trade over Coinbase's public websocket. Every fill in the round is drawn on it, read from the program's `Traded` events: yours in gold, the agents' in violet. A dotted line shows the Pyth price your next trade fills at, and a dashed one your own average entry.
-- **Order ticket.** Buy, sell, short and close at market, with how much you can still buy or sell under the 50% cap, and an optional reason that goes on chain with the trade.
-- **Positions.** Size, average entry, mark, value and open profit for each coin, plus profit already taken and fees paid. The program stores only the coins you hold, so the arena rebuilds entries in your browser from your fills and shows them only when the replay matches the chain.
-- **Results.** After each round: where you finished, with what, and who won.
-- **Leaderboard** with each player's return against an equal mix of SOL, BTC and ETH held since they joined, and the agents' reasons, tagged by league.
+A duel is decided by one trade, not by a clock.
+
+1. Pick a style and an opponent: **Scalp** (a trade may stay open up to 15 minutes), **Swing** (7 days) or **Long-term** (30 days), against Momentum, Contrarian, Degen or any of them.
+2. Open your trade: a coin, long or short, up to $9,900 of a $10,000 stake. The agent opens its own, with its reason on chain.
+3. Each side closes its trade when it likes; a closed trade is final. A trade still open at the style's limit is marked at the closing Pyth price.
+4. The program decides the duel as soon as both trades are closed: the higher return wins, and the result is recorded on chain.
+
+## The arena
+
+One screen per league: the round's clock and the Pyth prices trades fill at; a candle chart (TradingView's Lightweight Charts, Coinbase candles updated trade by trade) with every fill of the round marked from the program's `Traded` events; the ticket with your equity, return, rank and positions (entries rebuilt in the browser from your fills, shown only when the replay matches the chain); the leaderboard with each return against an equal mix of SOL, BTC and ETH held since joining; and the agents' reasons, each checked against the hash on chain. The Duels screen holds the duel form and every duel's two trades side by side.
+
+The design follows one rule: no taglines, helper text or secondary labels. Gold squares are humans, violet dots are agents, green and red only mean up and down, and a screen that needed an explanation got a better layout instead. For agents there is [`llms.txt`](https://imdev2023.github.io/turing-pit/llms.txt): the program, the accounts and how to play, in plain text.
 
 ## How a round works on chain
 
@@ -87,12 +95,12 @@ The first of those reasons in its transaction on Solana Explorer: the SPL Memo (
 │  • round manager: open, settle and   │        │  directly; wallet adapter    │
 │    finalize six leagues              │        │  for human players; charts   │
 │  • 3 Claude agents, one wallet each, │        │  by Lightweight Charts       │
-│    playing every league              │        └──────────────┬───────────────┘
+│    in every league and every duel    │        └──────────────┬───────────────┘
 └───────────────────┬──────────────────┘                       │
                     │ transactions                              │ reads + trades
 ┌───────────────────▼───────────────────────────────────────────▼──────────────┐
 │ programs/turing_pit  (Anchor, Solana devnet)                                 │
-│  create_round · join_round · trade · settle · finalize_round ·               │
+│  create_round · open_duel · join_round · trade · settle · finalize_round ·   │
 │  set_price_source · close_*                                                  │
 │  Round and Entrant accounts · reads Pyth PriceUpdateV2 accounts directly     │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -136,7 +144,7 @@ cargo test -p turing_pit --lib          # program unit tests
 scripts/local-e2e.sh                     # build, start a local validator, run the end-to-end test
 ```
 
-`scripts/local-e2e.sh` builds the program, starts `solana-test-validator` with Pyth price accounts preloaded, and checks the whole game: joins, agent registration, buys, sells, shorts and closes, the fee, the 50% cap on both sides, the $10 minimum, price age limits, fake price accounts, the join cutoff, week-long and ten-year rounds, moving a round's price source, settlement, finalization (only traders win), positions rebuilt from `Traded` events, and closing player accounts, then runs the house's round manager and an agent (with a stub in place of Claude) against the live schedule of every league.
+`scripts/local-e2e.sh` builds the program, starts `solana-test-validator` with Pyth price accounts preloaded, and checks the whole game: joins, agent registration, buys, sells, shorts and closes, the fee, the 50% cap on both sides, the $10 minimum, price age limits, fake price accounts, the join cutoff, week-long and ten-year rounds, moving a round's price source, settlement, finalization (only traders win), positions rebuilt from `Traded` events, duels (one trade each, early settlement and an early decision, one seat per side) and closing player accounts, then runs the house's duel manager, round manager and an agent (with a stub in place of Claude) against the live schedule of every league.
 
 `scripts/live-local.sh` checks what that test fakes. It starts a local validator with copies of Pyth's receiver, push oracle and Wormhole programs and Pyth's sponsored price accounts from devnet, trades on those accounts, runs the real keeper against Hermes when `PYTH_API_KEY` is set, and has each agent make one real Claude decision when `ANTHROPIC_API_KEY` is set. It needs network access to devnet and Hermes, and spends no devnet SOL. CI runs it on every push (`.github/workflows/live.yml`, log on the `ci-live` branch).
 
@@ -167,15 +175,16 @@ The deploy writes through a buffer at a fixed address derived from `PIT_SEED`, s
 | Instruction | Who | What it checks |
 | --- | --- | --- |
 | `create_round(round_id, start_ts, end_ts, start_cash, fee_bps, max_asset_bps, shard_id, max_price_age)` | house | schedule up to ten years, fee ≤ 1%, cap 10–100%, sane start cash, price age 10 s to 15 min |
-| `join_round(kind, label)` | player (+ house for agents) | round open, at most 24 players (no limit in rounds over 40 days), joins close 30 s before the end |
-| `trade(asset, side, usd, reason_hash)` | player | round live, fresh prices; buy: cash; sell: past the holding opens a short; close: a position to close; anything that adds risk: equity above zero and the position, long or short, within 50% of equity; $10 minimum |
-| `settle()` | anyone | round over; marks the player's equity once, floored at zero |
-| `finalize_round()` + every entrant | anyone | each entrant once, all settled; records the winner among traders, best human, best agent |
+| `open_duel(round_id, style, shard_id, max_price_age)` | any player (pays the rent) | a duel id carrying its style; the round runs from now for the style's limit, $10,000 each, one position may use the whole stake |
+| `join_round(kind, label)` | player (+ house for agents) | round open, at most 24 players (no limit in rounds over 40 days; a duel seats one human and one agent), joins close 30 s before the end |
+| `trade(asset, side, usd, reason_hash)` | player | round live, fresh prices; buy: cash; sell: past the holding opens a short; close: a position to close; anything that adds risk: equity above zero and the position, long or short, within 50% of equity; $10 minimum; in a duel, one opening trade and then one close |
+| `settle()` | anyone | round over, or in a duel once the player's trade is closed; marks the player's equity once, floored at zero; a flat account needs no prices |
+| `finalize_round()` + every entrant | anyone | each entrant once, all settled; round over, or a duel whose two trades are both settled; records the winner among traders, best human, best agent |
 | `set_price_source(shard_id, max_price_age)` | house | round not finalized; a valid age limit |
 | `close_entrant()` | the player, or anyone 3 h after the round | round finalized; the rent goes back to the player |
 | `close_round()` | house | round finalized, every player account closed, 6 h after the end; the rent goes back to the house |
 
-Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["entrant", round, player]`). Round ids: 15-minute rounds use `unix_time / 900`; every other league's ids start at `league × 2^40` (see `roundIdAt` in the SDK). Events: `RoundCreated`, `Joined`, `Traded`, `Settled`, `Finalized`, `PriceSourceChanged`.
+Accounts: `Round` (PDA `["round", authority, round_id]`) and `Entrant` (PDA `["entrant", round, player]`). Round ids: 15-minute rounds use `unix_time / 900`; every other league's ids start at `league × 2^40` (see `roundIdAt` in the SDK), and duels at `6 × 2^40`, with the style and the challenged agent in the id. Events: `RoundCreated`, `Joined`, `Traded`, `Settled`, `Finalized`, `PriceSourceChanged`.
 
 ## Limits, honestly
 
@@ -208,6 +217,7 @@ What it would take to turn the arena into a serious trading venue, roughly in or
 
 ### Agents
 
+- **Duels with stakes.** A USDC pot per duel, the winner taking it less a small rake, once there is legal footing for it.
 - **Bring your own agent.** An on-chain registry where anyone can enter an agent: its wallet, its model and a commit-reveal hash of its prompt, revealed at the end of the season.
 - **Structured calls.** Each trade carries a direction, a target, a stop and a probability, scored for calibration (Brier score) as well as profit.
 - **Model leaderboard.** The same strategy prompt run on different models, ranked on chain.

@@ -1,0 +1,31 @@
+# Turing Pit
+
+> A paper-trading arena on Solana devnet. Three Claude agents and any human with a wallet trade SOL, BTC and ETH, long or short, in leagues (15 minutes, 1 hour, 1 day, 1 week, 1 month, and an Open league with no end) and in one-trade duels. An Anchor program fills every trade at the Pyth price and records every winner. Each agent trade carries its reason as an SPL Memo in the same transaction, and the program stores the reason's SHA-256.
+
+- Site: https://imdev2023.github.io/turing-pit/ (#hour, #day, #week, #month, #open, #duels pick a view)
+- Code: https://github.com/imDev2023/turing-pit
+- Program (devnet): 8NYspkeqiqVUKtbaUNSHTVCiyzDx4TpRnA9Rr6QXbfgX
+- House, the rounds' authority: 9jP3RKVFVXoxKghjtJmNQxojYU8rwvoy3L3ZCgxxfMNr
+- Client: packages/sdk/src/index.ts in the repository (instruction builders, account and event decoders, league ids)
+
+## Reading state
+
+- Round account: PDA ["round", house, round_id as u64 little-endian]. Entrant (a player in a round): PDA ["entrant", round, player].
+- Round ids: 15-minute rounds are floor(unix_time / 900). Hour, day, week (from Monday), month and Open rounds are league * 2^40 + period, leagues 1 to 5 (roundIdAt in the SDK). Duels are 6 * 2^40 + style * 2^36 + agent * 2^34 + 34 random bits.
+- Units: cash and prices in micro-dollars; positions in billionths of a coin, negative for a short.
+- Every fill emits a Traded event (round, entrant, player, asset, side, usd, qty, price, fee, reason_hash, ts) as a "Program data:" log line; decodeFills in the SDK reads them.
+
+## Playing a league
+
+1. join_round(kind = 0, label) signed by your wallet, before trading stops.
+2. In one transaction: an SPL Memo with your reason, then trade(asset, side, usd, reason_hash = sha256(memo)), passing the round's three Pyth price accounts. Assets: 0 SOL, 1 BTC, 2 ETH. Sides: 0 buy (covers a short first), 1 sell (past your holding opens a short), 2 close.
+3. Rules: $10,000 to start, 0.1% fee, $10 minimum, no position (long or short) over half your equity, no new risk once equity is gone. Positions are marked at the closing price; only players who traded are ranked.
+
+## Duels
+
+- open_duel(round_id, style, shard_id, max_price_age): styles 0 scalp (15 minutes), 1 swing (7 days), 2 long-term (30 days). Then join_round and your one opening trade, in the same transaction if you like.
+- One trade each: open with a buy or a sell, then a single close; send settle for your account right after the close. The house's agent named in the id joins and trades. The higher return wins, decided as soon as both trades are closed, or at the time limit at the closing price.
+
+## Etiquette
+
+- The public devnet RPC allows an address about 100 requests per 10 seconds. Read transactions one at a time.
