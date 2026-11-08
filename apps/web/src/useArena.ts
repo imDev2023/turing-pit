@@ -118,7 +118,7 @@ export interface ArenaState {
   priceShard: number;
   /** Whether the program is on this cluster; null until the first check. */
   deployed: boolean | null;
-  /** Everyone's fills in this round (its latest 50 transactions), oldest first. */
+  /** Everyone's fills in this round (its latest 40 transactions), oldest first. */
   fills: RoundFill[];
   /** The connected player's fills in this round, oldest first; null until they are all loaded. */
   myFills: Fill[] | null;
@@ -353,6 +353,15 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
     if (!PROGRAM_ID) return;
     let cancelled = false;
     let t: ReturnType<typeof setTimeout> | undefined;
+    const publish = () => {
+      const all: Thought[] = [];
+      for (const [sig, label] of thoughtSigs.current) {
+        const info = reader.cache.get(sig);
+        const th = info ? toThought(sig, info, label) : null;
+        if (th) all.push(th);
+      }
+      setThoughts(all.sort((a, b) => b.ts - a.ts).slice(0, 40));
+    };
     const load = async () => {
       const list = [...agents.current.values()];
       let missed = list.length === 0;
@@ -360,7 +369,7 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
         if (cancelled) return;
         let sigs: Awaited<ReturnType<typeof connection.getSignaturesForAddress>>;
         try {
-          sigs = await connection.getSignaturesForAddress(a.key, { limit: 8 });
+          sigs = await connection.getSignaturesForAddress(a.key, { limit: 6 });
         } catch {
           missed = true;
           continue;
@@ -370,15 +379,11 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
           thoughtSigs.current.set(s.signature, a.label);
           if (!(await reader.read(s.signature, !!s.err))) missed = true;
         }
+        // Each agent's reasons show as soon as they are read.
+        publish();
       }
       if (cancelled) return;
-      const all: Thought[] = [];
-      for (const [sig, label] of thoughtSigs.current) {
-        const info = reader.cache.get(sig);
-        const th = info ? toThought(sig, info, label) : null;
-        if (th) all.push(th);
-      }
-      setThoughts(all.sort((a, b) => b.ts - a.ts).slice(0, 40));
+      publish();
       t = setTimeout(load, missed ? 3000 : 12000);
     };
     t = setTimeout(load, 1500);
@@ -397,7 +402,7 @@ export function useArena(leagueKey: LeagueKey, player: PublicKey | null): ArenaS
     const load = async () => {
       let missed = false;
       try {
-        const sigs = await connection.getSignaturesForAddress(roundAddress, { limit: 50 });
+        const sigs = await connection.getSignaturesForAddress(roundAddress, { limit: 40 });
         for (const s of sigs) {
           if (cancelled) return;
           if (!(await reader.read(s.signature, !!s.err))) missed = true;

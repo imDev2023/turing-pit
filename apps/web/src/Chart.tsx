@@ -44,6 +44,7 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
   const markers = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const priceLines = useRef<IPriceLine[]>([]);
   const last = useRef<Candle | null>(null);
+  const first = useRef(0);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
 
   useEffect(() => {
@@ -93,6 +94,7 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
           if (cancelled || !series.current) return;
           series.current.setData(cs.map((x) => ({ ...x, time: x.time as UTCTimestamp })));
           last.current = cs[cs.length - 1] ?? null;
+          first.current = cs[0]?.time ?? 0;
           if (!fitted) chart.current?.timeScale().setVisibleLogicalRange({ from: Math.max(0, cs.length - 110), to: cs.length + 6 });
           fitted = true;
           setState("ok");
@@ -130,11 +132,15 @@ export function Chart({ asset, seconds, marks, lines }: { asset: Asset; seconds:
   useEffect(() => {
     if (!markers.current) return;
     const color = { me: token("--human"), agent: token("--machine"), human: token("--chalk") };
+    // Only on candles the chart has: a trade in a minute with no candle yet waits for its tick.
+    const newest = last.current?.time ?? 0;
     const list: SeriesMarker<Time>[] = marks
       .filter((m) => m.asset === asset)
-      .sort((a, b) => a.ts - b.ts)
+      .map((m) => ({ ...m, bar: Math.floor(m.ts / seconds) * seconds }))
+      .filter((m) => m.bar >= first.current && m.bar <= newest)
+      .sort((a, b) => a.bar - b.bar)
       .map((m) => ({
-        time: (Math.floor(m.ts / seconds) * seconds) as UTCTimestamp,
+        time: m.bar as UTCTimestamp,
         position: m.buy ? "belowBar" : "aboveBar",
         shape: m.buy ? "arrowUp" : "arrowDown",
         color: color[m.who],

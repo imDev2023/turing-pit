@@ -393,7 +393,7 @@ function GameClock({ arena, phase }: { arena: ArenaState; phase: Phase }) {
   if (league.key === "open") {
     return (
       <div className="clock">
-        <p className="clock-label">Open league · no time limit</p>
+        <p className="clock-label">Open league · no time limit · running for</p>
         <p className="clock-time long" aria-live="off">
           {countdown(now - arena.start)}
         </p>

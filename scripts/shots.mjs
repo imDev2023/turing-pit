@@ -55,6 +55,9 @@ async function openArena(context) {
   await page
     .waitForSelector(".thoughts .thought", { timeout: 45_000 })
     .catch(() => console.log("no agent reasons on the page after 45 s"));
+  await page
+    .waitForFunction(() => !document.querySelector(".chart-panel .chart-state"), null, { timeout: 30_000 })
+    .catch(() => console.log("no chart candles after 30 s"));
   await page.waitForTimeout(5_000);
   return page;
 }
@@ -65,7 +68,11 @@ async function describe(page) {
     const all = (sel) => [...document.querySelectorAll(sel)];
     return {
       at: new Date().toISOString(),
+      league: t(document.querySelector(".leagues .on")),
       clock: `${t(document.querySelector(".clock-label"))} ${t(document.querySelector(".clock-time"))}`,
+      tickers: all(".tickers .ticker").map(t),
+      chart: document.querySelector(".chart-panel .chart-state") ? t(document.querySelector(".chart-panel .chart-state")) : "candles shown",
+      lastRound: t(document.querySelector(".last-round")) || null,
       clockNote: t(document.querySelector(".clock-sub")),
       score: t(document.querySelector(".score")),
       banner: t(document.querySelector(".banner")) || null,
@@ -181,32 +188,54 @@ async function walkthrough() {
   // Title card first, so the video doesn't open on a half-drawn page.
   await card(
     p,
-    `<h1>Turing Pit</h1><p><b class="m">Three Claude agents</b> and <b class="h">anyone with a wallet</b> trade SOL, BTC and ETH in fifteen-minute rounds on Solana devnet.</p>`,
+    `<h1>Turing Pit</h1><p><b class="m">Three Claude agents</b> and <b class="h">anyone with a wallet</b> trade SOL, BTC and ETH, long or short, on Solana devnet.</p>`,
   );
   await wait(0.8);
   const SCREENCAST = { format: "jpeg", quality: 92, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 };
   /** Stretches when the recording was paused, left out of the video. */
   const gaps = [];
+  /** When each scene starts on the film's own clock (pauses left out), for placing narration. */
+  const timeline = [];
+  const scene = (name) => {
+    const now = Date.now() / 1000;
+    const paused = gaps.reduce((sum, [from, to]) => sum + Math.max(0, Math.min(now, to) - from), 0);
+    timeline.push({ scene: name, at: Number((now - started - paused).toFixed(2)) });
+  };
   await cdp.send("Page.startScreencast", SCREENCAST);
   const started = Date.now() / 1000;
+  scene("title");
   await wait(4.5);
   await card(p, "");
   await wait(0.8);
 
-  await caption(p, "A round opens every fifteen minutes. Everyone starts with $10,000 of paper cash.");
+  scene("leagues");
+  await spot(p, ".leagues");
+  await caption(p, "Pick a league: fifteen minutes, an hour, a day, a week, a month, or the Open league with no end.");
+  await wait(2.2);
+  await p.locator(".leagues button", { hasText: "1 week" }).click().catch(() => {});
+  await wait(2.2);
+  await p.locator(".leagues button", { hasText: "15 min" }).click().catch(() => {});
+  await wait(2);
+
+  scene("chart");
+  await glide(p, ".terminal", 24);
+  await spot(p, ".chart-panel");
+  await caption(p, "A live chart, with every trade of the round marked on it, read from the program's events.");
+  await wait(6);
+
+  scene("ticket");
+  await spot(p, ".seat");
+  await caption(p, "Go long or short with your wallet. Trades fill on chain at the latest Pyth price.");
   await wait(5.5);
 
-  await glide(p, ".prices", 120);
-  await spot(p, ".prices");
-  await caption(p, "Trades fill on chain at the latest Pyth price, with a 0.1% fee.");
-  await wait(5);
-
+  scene("board");
   await glide(p, ".grid", 70);
   await spot(p, ".board-panel");
-  await caption(p, "A Solana program keeps the books: it fills every trade, marks every account to market and records the winner.");
-  await wait(6.5);
+  await caption(p, "A Solana program keeps the books. Only players who trade are ranked, and every return is measured against the market.");
+  await wait(7);
 
   const hasThoughts = await p.locator(".thoughts .thought").count();
+  scene("thoughts");
   await spot(p, ".thoughts");
   await caption(
     p,
@@ -216,21 +245,19 @@ async function walkthrough() {
   );
   await wait(7);
 
-  await spot(p, ".seat");
-  await caption(p, "Anyone with a Solana wallet can take a seat and trade against them.");
-  await wait(5);
-
   if (await p.locator(".history").count()) {
+    scene("history");
     await glide(p, ".history", 90);
     await spot(p, ".history");
     await caption(p, "Every finished round, and who won it, comes straight from the chain.");
     await wait(5);
   }
 
+  scene("agents");
   await glide(p, ".agents", 70);
   await spot(p, null);
   await p.locator(".agents details summary").first().click().catch(() => {});
-  await caption(p, "Each agent is Claude with its own wallet and its own style. Its full prompt is on the page.");
+  await caption(p, "Each agent is Claude with its own wallet and its own style, in every league. Its full prompt is on the page.");
   await wait(6.5);
 
   const first = p.locator(".thoughts .thought").first();
@@ -265,6 +292,7 @@ async function walkthrough() {
     await cdp.send("Page.startScreencast", SCREENCAST);
     gaps.push([pausedAt, Date.now() / 1000]);
     if (memo) {
+      scene("explorer");
       await wait(2.4);
       await card(p, "");
       await wait(1);
@@ -278,6 +306,7 @@ async function walkthrough() {
   }
 
   await caption(p, "");
+  scene("end");
   await card(p, endCard);
   await wait(5.5);
   await cdp.send("Page.stopScreencast");
@@ -303,6 +332,9 @@ async function walkthrough() {
     { stdio: "inherit" },
   );
   console.log(`walkthrough.mp4: ${kept.length} frames over ${(ended - started - paused(started, ended)).toFixed(1)} s`);
+  timeline.push({ scene: "length", at: Number((ended - started - paused(started, ended)).toFixed(2)) });
+  writeFileSync(join(out, "timeline.json"), JSON.stringify(timeline, null, 1) + "\n");
+  console.log("timeline", JSON.stringify(timeline));
 }
 
 // Desktop: the first screen, the whole page and the main panels.
@@ -311,6 +343,11 @@ const page = await openArena(desk);
 await page.screenshot({ path: join(out, "desktop.png") });
 await page.screenshot({ path: join(out, "desktop-full.png"), fullPage: true });
 for (const [name, sel] of [
+  ["leagues", ".leagues"],
+  ["terminal", ".terminal"],
+  ["chart", ".chart-panel"],
+  ["ticket", ".seat"],
+  ["positions", ".positions"],
   ["prices", ".prices"],
   ["board", ".board-panel"],
   ["thoughts", ".thoughts"],
