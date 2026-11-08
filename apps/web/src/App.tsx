@@ -14,6 +14,7 @@ import {
   ROUND_SECONDS,
   SHARD_ID,
   SIDE_BUY,
+  SIDE_CLOSE,
   SIDE_SELL,
   agentSystemPrompt,
   explainError,
@@ -305,13 +306,15 @@ function BoardRow({ row, rank, prices, me }: { row: Row; rank: number; prices: n
         <span className="kind">{ai ? "Claude agent" : me ? "You" : "Human"}</span>
       </span>
       <span className="holds">
-        {ASSETS.map((a, i) =>
-          row.entrant.qty[i] > 0 ? (
-            <span key={a} className="chip">
-              {a} {usd(row.entrant.qty[i] * prices[i], 0)}
+        {ASSETS.map((a, i) => {
+          const v = row.entrant.qty[i] * prices[i];
+          if (Math.abs(v) < 0.5) return null;
+          return (
+            <span key={a} className={`chip ${v < 0 ? "short" : ""}`}>
+              {a} {v < 0 ? "short " : ""}{usd(Math.abs(v), 0)}
             </span>
-          ) : null,
-        )}
+          );
+        })}
         {row.entrant.cash >= 1 && <span className="chip cash">Cash {usd(row.entrant.cash, 0)}</span>}
       </span>
       <span className="eq">{usd(row.equity)}</span>
@@ -341,7 +344,9 @@ function Thoughts({ thoughts, now }: { thoughts: Thought[]; now: number }) {
               </header>
               {t.trade && (
                 <p className={`act ${t.trade.side === SIDE_BUY ? "up" : "down"}`}>
-                  {t.trade.side === SIDE_BUY ? "Bought" : "Sold"} {usd(t.trade.usd, 0)} of {t.trade.asset}
+                  {t.trade.side === SIDE_CLOSE
+                    ? `Closed the ${t.trade.asset} position`
+                    : `${t.trade.side === SIDE_BUY ? "Bought" : "Sold"} ${usd(t.trade.usd, 0)} of ${t.trade.asset}`}
                 </p>
               )}
               <blockquote>{t.reason}</blockquote>
@@ -436,12 +441,13 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
   const i = ASSETS.indexOf(asset);
   const price = arena.prices[i]?.price ?? 0;
   const held = me ? me.entrant.qty[i] * price : 0;
-  const room = me ? Math.max(0, (me.equity * MAX_ASSET_BPS) / 10_000 - held) : 0;
+  const cap = me ? (me.equity * MAX_ASSET_BPS) / 10_000 : 0;
+  const room = me ? Math.max(0, Math.min(me.entrant.cash, cap - held)) : 0;
 
   const trade = (side: number) => {
     if (!publicKey || !PROGRAM_ID || !arena.roundAddress) return;
-    const value = Number(amount);
-    if (!(value >= 10)) return setMsg({ ok: false, text: "Trades start at $10. Enter a larger amount." });
+    const value = side === SIDE_CLOSE ? 0 : Number(amount);
+    if (side !== SIDE_CLOSE && !(value >= 10)) return setMsg({ ok: false, text: "Trades start at $10. Enter a larger amount." });
     const reason = why.trim().slice(0, 200) || "No reason given";
     const tx = new Transaction().add(
       memoIx(reason),
@@ -456,8 +462,15 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
         shardId: arena.round?.shardId,
       }),
     );
-    const sold = side === SIDE_SELL && value >= held ? `Sold all your ${asset}` : `Sold ${usd(value, 0)} of ${asset}`;
-    send(tx, side === SIDE_BUY ? `Bought ${usd(value, 0)} of ${asset}` : sold);
+    const done =
+      side === SIDE_CLOSE
+        ? `Closed your ${asset} position`
+        : side === SIDE_BUY
+          ? `Bought ${usd(value, 0)} of ${asset}`
+          : held - value < -0.5
+            ? `Sold ${usd(value, 0)} of ${asset}: you're now short ${usd(value - Math.max(held, 0), 0)}`
+            : `Sold ${usd(value, 0)} of ${asset}`;
+    send(tx, done);
     setWhy("");
   };
 
@@ -544,8 +557,8 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
                   {f * 100}% of room
                 </button>
               ))}
-              <button onClick={() => setAmount(String(Math.ceil(held * 1.02) + 1))} disabled={held < 10}>
-                All my {asset}
+              <button onClick={() => trade(SIDE_CLOSE)} disabled={busy || phase !== "live" || Math.abs(held) < 0.5}>
+                Close my {asset}
               </button>
             </div>
             <label className="field">
@@ -556,12 +569,13 @@ function Seat({ arena, phase }: { arena: ArenaState; phase: Phase }) {
               <button className="buy" disabled={busy || phase !== "live"} onClick={() => trade(SIDE_BUY)}>
                 Buy {asset}
               </button>
-              <button className="sell" disabled={busy || phase !== "live" || held < 10} onClick={() => trade(SIDE_SELL)}>
-                Sell {asset}
+              <button className="sell" disabled={busy || phase !== "live"} onClick={() => trade(SIDE_SELL)}>
+                {held > 0.5 ? `Sell ${asset}` : `Short ${asset}`}
               </button>
             </div>
             <p className="fine">
-              You hold {usd(held)} of {asset}. You can buy {usd(room, 0)} more before hitting the 50% limit. Every trade pays a 0.1% fee.
+              {Math.abs(held) < 0.5 ? `You have no ${asset} position.` : held > 0 ? `You're long ${usd(held)} of ${asset}.` : `You're short ${usd(-held)} of ${asset}.`}{" "}
+              Selling more than you hold opens a short. A position, long or short, can't exceed half your equity ({usd(cap, 0)}). Every trade pays a 0.1% fee.
             </p>
           </div>
         </>

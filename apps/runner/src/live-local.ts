@@ -258,7 +258,8 @@ async function main() {
         create: async (req: Anthropic.MessageCreateParamsNonStreaming) => {
           try {
             const res = await claude.messages.create(req);
-            decision = (res.content.find((b) => b.type === "tool_use") as { input?: Record<string, unknown> } | undefined)?.input;
+            // The agent plays every league in turn; the 15-minute round comes first and is the one checked.
+            decision ??= (res.content.find((b) => b.type === "tool_use") as { input?: Record<string, unknown> } | undefined)?.input;
             console.log(`  ..    ${persona.label}: ${res.usage.input_tokens} tokens in, ${res.usage.output_tokens} out`);
             return res;
           } catch (e) {
@@ -276,7 +277,7 @@ async function main() {
     const reason = typeof decision?.reason === "string" ? decision.reason : "";
     check(
       `${persona.label} decides: ${action ?? "nothing"} ${decision?.asset ?? ""} ${decision?.usd ?? ""} "${reason}"`,
-      !error && ["buy", "sell", "hold"].includes(String(action)) && reason.length > 0,
+      !error && ["buy", "sell", "close", "hold"].includes(String(action)) && reason.length > 0,
       error || decision,
     );
     if (reason.length > 200) console.log(`  note  the reason ran to ${reason.length} characters; the runner cuts it at 200`);

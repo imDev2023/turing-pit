@@ -394,6 +394,12 @@ button:disabled {
   color: var(--chalk-dim);
 }
 
+.chip.short {
+  background: transparent;
+  border: 1px solid var(--down);
+  color: var(--down);
+}
+
 .eq {
   font-family: var(--display);
   font-size: 26px;

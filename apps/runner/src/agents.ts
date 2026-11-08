@@ -1,21 +1,25 @@
-// Three Claude-powered traders. Each holds its own wallet, decides every ~45 seconds, and posts
-// its reason on chain as a memo in the same transaction as the trade; the program stores the
-// reason's hash, so anyone can check the memo is the reason the trade was made with.
+// Three Claude-powered traders. Each holds its own wallet, plays every league (15 minutes to a
+// month, and the open-ended one), and posts its reason on chain as a memo in the same transaction
+// as the trade; the program stores the reason's hash, so anyone can check the memo is the reason
+// the trade was made with. Agents go long or short.
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { Keypair, PublicKey } from "@solana/web3.js";
+import type { Keypair } from "@solana/web3.js";
 import {
   ASSETS,
   KIND_AGENT,
+  LEAGUES,
   MAX_ASSET_BPS,
   MIN_TRADE_USD,
   PERSONAS,
   PRICE_AGE_KEEPER,
   SIDE_BUY,
+  SIDE_CLOSE,
   SIDE_SELL,
   entrantPda,
   equityOf,
   joinRoundIx,
+  leagueOf,
   memoIx,
   reasonHash,
   roundIdAt,
@@ -24,6 +28,8 @@ import {
   agentSystemPrompt,
   type Asset,
   type Entrant,
+  type League,
+  type LeagueKey,
   type Persona,
 } from "@turing-pit/sdk";
 import { log, sleep, type Config } from "./config.js";
@@ -34,10 +40,16 @@ import { sendIxs, shortError } from "./send.js";
 export { PERSONAS };
 
 interface Decision {
-  action: "buy" | "sell" | "hold";
+  action: "buy" | "sell" | "close" | "hold";
   asset?: Asset;
   usd?: number;
   reason: string;
+}
+
+interface Order {
+  asset: Asset;
+  side: number;
+  usd: number;
 }
 
 const DECIDE_TOOL = {
@@ -46,9 +58,13 @@ const DECIDE_TOOL = {
   input_schema: {
     type: "object" as const,
     properties: {
-      action: { type: "string", enum: ["buy", "sell", "hold"] },
+      action: {
+        type: "string",
+        enum: ["buy", "sell", "close", "hold"],
+        description: "buy: go long or cover a short. sell: cut a long, or sell more than you hold to go short. close: flatten the whole position in the asset.",
+      },
       asset: { type: "string", enum: [...ASSETS] },
-      usd: { type: "number", description: "Dollars to spend on a buy, or dollar value to sell." },
+      usd: { type: "number", description: "Dollars to spend on a buy, or dollar value to sell. Not needed for close." },
       reason: {
         type: "string",
         description: "Why, in at most 200 characters, citing the numbers you used. This is posted on chain.",
@@ -58,14 +74,49 @@ const DECIDE_TOOL = {
   },
 };
 
+/** The least time between two decisions in a league, so Claude is asked as often as the round
+ *  length deserves: a few times a sprint, a few times a day in the long leagues. */
+const CADENCE_MS: Record<LeagueKey, number> = {
+  sprint: 120_000,
+  hour: 600_000,
+  day: 3_600_000,
+  week: 4 * 3_600_000,
+  month: 12 * 3_600_000,
+  open: 6 * 3_600_000,
+};
+
 const fmt = (n: number, d = 2) => n.toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d });
+
+function timeLeft(seconds: number): string {
+  if (seconds >= 2 * 86_400) return `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3_600)}h`;
+  if (seconds >= 3_600) return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+/** The 24-hour picture from Coinbase for the long leagues, refreshed every ten minutes. */
+const market: { at: number; stats: Partial<Record<Asset, { open: number; high: number; low: number }>> } = { at: 0, stats: {} };
+async function dayStats(): Promise<typeof market.stats> {
+  if (Date.now() - market.at < 600_000) return market.stats;
+  market.at = Date.now();
+  await Promise.all(
+    ASSETS.map(async (a) => {
+      try {
+        const r = await fetch(`https://api.exchange.coinbase.com/products/${a}-USD/stats`, { signal: AbortSignal.timeout(5_000) });
+        const s = (await r.json()) as { open: string; high: string; low: string };
+        market.stats[a] = { open: Number(s.open), high: Number(s.high), low: Number(s.low) };
+      } catch {
+        // context only; the decision goes ahead without it
+      }
+    }),
+  );
+  return market.stats;
+}
 
 export class Agent {
   private joined = new Set<number>();
-  private recent: string[] = [];
-  /** The prices (publish times) the last decision saw, and when it was made. */
-  private decidedOn = "";
-  private decidedAt = 0;
+  private recent = new Map<LeagueKey, string[]>();
+  /** When the last decision in each league was made. */
+  private decidedAt = new Map<LeagueKey, number>();
   private usage = { calls: 0, input: 0, output: 0 };
 
   constructor(
@@ -105,54 +156,79 @@ export class Agent {
         [this.wallet, this.cfg.keys.authority],
       );
       this.joined.add(roundId);
-      log(this.label, `joined round ${roundId}`);
+      log(this.label, `joined round ${roundId} (${leagueOf(roundId).label})`);
     } catch (e) {
       log(this.label, `join failed for round ${roundId}:`, shortError(e));
     }
   }
 
+  /** Dollars of coin `i` the agent can buy: its cash, and the cap on a long (a short is covered first). */
+  private buyRoom(me: Entrant, prices: [number, number, number], equity: number, i: number): number {
+    const position = me.qty[i] * prices[i];
+    return Math.max(0, Math.min(me.cash, ((equity * MAX_ASSET_BPS) / 10_000 - position) * 0.98));
+  }
+
+  /** Dollars of coin `i` the agent can sell: its long, then a short up to the cap. */
+  private sellRoom(me: Entrant, prices: [number, number, number], equity: number, i: number): number {
+    const position = me.qty[i] * prices[i];
+    return Math.max(0, ((equity * MAX_ASSET_BPS) / 10_000 + position) * 0.98);
+  }
+
   private snapshot(
+    league: League,
     me: Entrant,
     others: Entrant[],
     prices: [number, number, number],
-    secondsLeft: number,
+    secondsLeft: number | null,
     maxPriceAge: number,
+    day: Awaited<ReturnType<typeof dayStats>>,
   ): string {
     const equity = equityOf(me, prices);
     const board = [me, ...others]
       .map((e) => ({ label: e.label, kind: e.kind === KIND_AGENT ? "AI" : "human", equity: equityOf(e, prices) }))
       .sort((a, b) => b.equity - a.equity);
     const rank = board.findIndex((b) => b.label === me.label) + 1;
-    const room = ASSETS.map((_, i) => Math.max(0, this.buyRoom(me, prices, equity, i)));
+    const buy = ASSETS.map((_, i) => this.buyRoom(me, prices, equity, i));
+    const sell = ASSETS.map((_, i) => this.sellRoom(me, prices, equity, i));
+    const pct = (c: number | undefined) => (c === undefined ? "n/a" : `${fmt(c, 3)}%`);
+    const long = league.key !== "sprint" && league.key !== "hour";
+    const position = (i: number) => {
+      const q = me.qty[i];
+      if (Math.abs(q * prices[i]) < 0.01) return `${ASSETS[i]} flat`;
+      return `${ASSETS[i]} ${q > 0 ? "long" : "short"} ${fmt(Math.abs(q), 6)} ($${fmt(Math.abs(q * prices[i]))})`;
+    };
+    const recent = this.recent.get(league.key) ?? [];
     const lines = [
-      `Time left in the round: ${Math.floor(secondsLeft / 60)}m ${secondsLeft % 60}s.`,
-      "Pyth prices now (% change over 1 and 5 minutes; how long ago the price was published):",
+      secondsLeft === null
+        ? "League: Open (no end). The highest equity leads."
+        : `League: ${league.label}. Time left in this round: ${timeLeft(secondsLeft)}.`,
+      "Pyth prices now (% change over 1 minute, 5 minutes and 1 hour; how long ago the price was published):",
       ...ASSETS.map((a, i) => {
-        const c1 = this.keeper.change(a, 60);
-        const c5 = this.keeper.change(a, 300);
-        const pct = (c: number | undefined) => (c === undefined ? "n/a" : `${fmt(c, 3)}%`);
-        return `  ${a}: $${fmt(prices[i])} (1m ${pct(c1)}, 5m ${pct(c5)}; ${this.keeper.age(a) ?? "?"}s ago)`;
+        const d = day[a];
+        const range = long && d ? `; 24h ${pct(((prices[i] - d.open) / d.open) * 100)}, range $${fmt(d.low)}-$${fmt(d.high)}` : "";
+        return `  ${a}: $${fmt(prices[i])} (1m ${pct(this.keeper.change(a, 60))}, 5m ${pct(this.keeper.change(a, 300))}, 1h ${pct(this.keeper.change(a, 3_600))}${range}; ${this.keeper.age(a) ?? "?"}s ago)`;
       }),
       `Trades fill at the latest published price while it is under ${maxPriceAge}s old.` +
         (maxPriceAge > PRICE_AGE_KEEPER ? " These devnet feeds publish about every 5 minutes, so a price a few minutes old is normal." : ""),
-      `Your cash: $${fmt(me.cash)}. Holdings: ${ASSETS.map((a, i) => `${a} ${fmt(me.qty[i], 6)} ($${fmt(me.qty[i] * prices[i])})`).join(", ")}.`,
-      `The most you can buy right now (your cash, and at most ${MAX_ASSET_BPS / 100}% of your equity in one coin): ` +
-        `${ASSETS.map((a, i) => `${a} $${fmt(room[i])}`).join(", ")}. Orders under $${MIN_TRADE_USD} are refused.`,
+      `Your cash: $${fmt(me.cash)}. Positions: ${ASSETS.map((_, i) => position(i)).join(", ")}.`,
+      `The most you can buy right now: ${ASSETS.map((a, i) => `${a} $${fmt(buy[i])}`).join(", ")}. ` +
+        `The most you can sell (your long, then a short): ${ASSETS.map((a, i) => `${a} $${fmt(sell[i])}`).join(", ")}. ` +
+        `No position may exceed ${MAX_ASSET_BPS / 100}% of your equity; orders under $${MIN_TRADE_USD} are refused.`,
       `Your equity: $${fmt(equity)} (started at $10,000.00). Rank ${rank} of ${board.length}.`,
       "Leaderboard:",
       ...board.slice(0, 5).map((b, i) => `  ${i + 1}. ${b.label} (${b.kind}) $${fmt(b.equity)}`),
-      this.recent.length ? `Your last decisions: ${this.recent.slice(-3).join(" | ")}` : "You have not traded yet this round.",
+      me.trades === 0 ? "You have not traded yet this round, and only players who trade can win." : "",
+      recent.length ? `Your last decisions in this league: ${recent.slice(-3).join(" | ")}` : "",
     ];
-    return lines.join("\n");
+    return lines.filter(Boolean).join("\n");
   }
 
-  private async decide(context: string): Promise<Decision | null> {
+  private async decide(league: League, context: string): Promise<Decision | null> {
     if (!this.claude) return null;
-    const system = agentSystemPrompt(this.persona);
     const res = await this.claude.messages.create({
       model: this.cfg.agentModel,
       max_tokens: 400,
-      system,
+      system: agentSystemPrompt(this.persona, league),
       tools: [DECIDE_TOOL],
       tool_choice: { type: "tool", name: "decide" },
       messages: [{ role: "user", content: context }],
@@ -174,76 +250,68 @@ export class Agent {
     };
   }
 
-  /** Dollars of coin `i` the agent can still buy: its cash, and the program's cap per coin (with a
-   *  little margin, since the price can move before the trade lands). */
-  private buyRoom(me: Entrant, prices: [number, number, number], equity: number, i: number): number {
-    const position = me.qty[i] * prices[i];
-    return Math.min(me.cash, ((equity * MAX_ASSET_BPS) / 10_000 - position) * 0.98);
-  }
-
-  /** Clamps a decision to what the program will accept. Returns null when there is nothing to do. */
-  private clamp(d: Decision, me: Entrant, prices: [number, number, number]): { asset: Asset; side: number; usd: number } | null {
-    if (d.action === "hold" || !d.asset || !d.usd) return null;
+  /** Turns a decision into an order the program will accept, or null when there is nothing to do. */
+  private clamp(d: Decision, me: Entrant, prices: [number, number, number]): Order | null {
+    if (d.action === "hold" || !d.asset) return null;
     const i = ASSETS.indexOf(d.asset);
     if (i < 0) return null;
+    const value = me.qty[i] * prices[i];
+    if (d.action === "close") return Math.abs(value) >= 0.01 ? { asset: d.asset, side: SIDE_CLOSE, usd: 0 } : null;
+    if (!d.usd) return null;
     const equity = equityOf(me, prices);
-    if (d.action === "buy") {
-      const usd = Math.min(d.usd, this.buyRoom(me, prices, equity, i));
-      // An order cut to a fraction of its size is no longer the trade its reason describes.
-      return usd >= MIN_TRADE_USD && usd >= d.usd / 2 ? { asset: d.asset, side: SIDE_BUY, usd } : null;
-    }
-    const held = me.qty[i] * prices[i];
-    if (held < MIN_TRADE_USD) return null;
-    return { asset: d.asset, side: SIDE_SELL, usd: Math.max(MIN_TRADE_USD, Math.min(d.usd, held)) };
+    // An order that would land within 1% of flat closes the position exactly instead.
+    if (d.action === "buy" && value < 0 && Math.abs(d.usd + value) <= Math.abs(value) * 0.01) return { asset: d.asset, side: SIDE_CLOSE, usd: 0 };
+    if (d.action === "sell" && value > 0 && Math.abs(d.usd - value) <= value * 0.01) return { asset: d.asset, side: SIDE_CLOSE, usd: 0 };
+    const room = d.action === "buy" ? this.buyRoom(me, prices, equity, i) : this.sellRoom(me, prices, equity, i);
+    const usd = Math.min(d.usd, room);
+    // An order cut to a fraction of its size is no longer the trade its reason describes.
+    if (usd < MIN_TRADE_USD || usd < d.usd / 2) return null;
+    return { asset: d.asset, side: d.action === "buy" ? SIDE_BUY : SIDE_SELL, usd };
   }
 
-  async tick() {
-    const now = Math.floor(Date.now() / 1000);
-    const roundId = roundIdAt(now);
-    const { start, end } = roundTimes(roundId);
+  /** One look at a league: join its round (and the next one as it nears), then decide if due. */
+  private async play(league: League, now: number) {
+    const roundId = roundIdAt(now, league.key);
+    const { start, end, next } = roundTimes(roundId);
     await this.ensureJoined(roundId);
-    if (now >= end - 240) await this.ensureJoined(roundId + 1);
+    if (league.key !== "open" && now >= next - 240) await this.ensureJoined(roundId + 1);
     if (now < start + 5 || now > end - 15) return;
+    if (Date.now() - (this.decidedAt.get(league.key) ?? 0) < CADENCE_MS[league.key]) return;
 
     const prices = ASSETS.map((a) => this.keeper.latest(a)) as [number, number, number];
     if (prices.some((p) => p === undefined)) return;
-
     const found = await fetchRound(this.cfg, roundId);
     if (!found) return;
     const entrants = (await fetchEntrants(this.cfg, found.address)).map((e) => e.entrant);
-    const me = entrants.find((e) => e.player.equals(this.wallet.publicKey as PublicKey));
+    const me = entrants.find((e) => e.player.equals(this.wallet.publicKey));
     if (!me) return;
     const others = entrants.filter((e) => !e.player.equals(this.wallet.publicKey));
-
-    // Pyth's sponsored devnet feeds move every few minutes: don't ask Claude about the same
-    // prices again, except every five minutes so the agent still sees the board and the clock.
-    const seen = ASSETS.map((a) => this.keeper.history?.[a]?.at(-1)?.t ?? 0).join(",");
-    if (seen === this.decidedOn && Date.now() - this.decidedAt < 300_000) return;
+    const day = league.key === "sprint" || league.key === "hour" ? {} : await dayStats();
 
     let decision: Decision | null = null;
     try {
-      decision = await this.decide(this.snapshot(me, others, prices, end - now, found.round.maxPriceAge));
-      this.decidedOn = seen;
-      this.decidedAt = Date.now();
+      const secondsLeft = league.key === "open" ? null : end - now;
+      decision = await this.decide(league, this.snapshot(league, me, others, prices, secondsLeft, found.round.maxPriceAge, day));
+      this.decidedAt.set(league.key, Date.now());
     } catch (e) {
       log(this.label, "Claude call failed:", (e as Error).message?.slice(0, 200));
       return;
     }
     if (!decision) return;
     const order = this.clamp(decision, me, prices);
-    const wanted = `${decision.action} ${decision.asset ?? "?"} $${Math.round(decision.usd ?? 0)}`;
-    this.recent.push(
-      decision.action === "hold" ? "hold" : order ? `${decision.action} ${order.asset} $${Math.round(order.usd)}` : `${wanted} (not placed: outside the limits)`,
-    );
-    if (this.recent.length > 6) this.recent.shift();
+    const wanted = `${decision.action} ${decision.asset ?? "?"}${decision.usd ? ` $${Math.round(decision.usd)}` : ""}`;
+    const recent = this.recent.get(league.key) ?? [];
+    recent.push(decision.action === "hold" ? "hold" : order ? describe(order) : `${wanted} (not placed: outside the limits)`);
+    this.recent.set(league.key, recent.slice(-6));
+    const where = `[${league.label}]`;
     if (!order) {
-      log(this.label, decision.action === "hold" ? `holds: ${decision.reason}` : `can't ${wanted} within the limits, so holds: ${decision.reason}`);
+      log(this.label, where, decision.action === "hold" ? `holds: ${decision.reason}` : `can't ${wanted} within the limits, so holds: ${decision.reason}`);
       return;
     }
     // The program refuses fills at prices older than the round allows; don't pay for a failed trade.
     const age = this.keeper.age(order.asset);
     if (age !== undefined && age > found.round.maxPriceAge - 3) {
-      log(this.label, `skips its ${order.asset} trade: the price is ${age}s old, over this round's ${found.round.maxPriceAge}s limit`);
+      log(this.label, where, `skips its ${order.asset} trade: the price is ${age}s old, over this round's ${found.round.maxPriceAge}s limit`);
       return;
     }
     try {
@@ -264,9 +332,20 @@ export class Agent {
         ],
         [this.wallet],
       );
-      log(this.label, `${order.side === SIDE_BUY ? "bought" : "sold"} $${Math.round(order.usd)} ${order.asset}: ${decision.reason}`, sig);
+      log(this.label, where, `${describe(order)}: ${decision.reason}`, sig);
     } catch (e) {
-      log(this.label, "trade failed:", shortError(e));
+      log(this.label, where, "trade failed:", shortError(e));
+    }
+  }
+
+  async tick() {
+    const now = Math.floor(Date.now() / 1000);
+    for (const league of LEAGUES) {
+      try {
+        await this.play(league, now);
+      } catch (e) {
+        log(this.label, `[${league.label}] tick error:`, shortError(e));
+      }
     }
   }
 
@@ -282,6 +361,11 @@ export class Agent {
       await sleep(Math.max(5_000, this.cfg.agentIntervalMs - (Date.now() - started)));
     }
   }
+}
+
+function describe(order: Order): string {
+  if (order.side === SIDE_CLOSE) return `closed ${order.asset}`;
+  return `${order.side === SIDE_BUY ? "bought" : "sold"} $${Math.round(order.usd)} ${order.asset}`;
 }
 
 export function makeAgents(cfg: Config, keeper: PriceKeeper): Agent[] {

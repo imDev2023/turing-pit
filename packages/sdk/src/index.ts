@@ -47,8 +47,12 @@ export const ROUND_CLOSE_DELAY_SECONDS = 6 * 60 * 60;
 
 export const KIND_HUMAN = 0;
 export const KIND_AGENT = 1;
+/** Buy: adds to a long, or covers a short first. */
 export const SIDE_BUY = 0;
+/** Sell: reduces a long, and past zero opens or adds to a short. */
 export const SIDE_SELL = 1;
+/** Close the whole position, long or short. */
+export const SIDE_CLOSE = 2;
 
 const MICRO = 1_000_000;
 const QTY_SCALE = 1_000_000_000n;
@@ -68,6 +72,7 @@ const IX = {
   finalizeRound: disc("global:finalize_round"),
   closeEntrant: disc("global:close_entrant"),
   closeRound: disc("global:close_round"),
+  setPriceSource: disc("global:set_price_source"),
 };
 const ACCOUNT = {
   round: disc("account:Round"),
@@ -126,13 +131,97 @@ export function feedAccounts(shardId = SHARD_ID): [PublicKey, PublicKey, PublicK
 
 // ---------- rounds ----------
 
-export function roundIdAt(unixSeconds: number): number {
-  return Math.floor(unixSeconds / ROUND_SECONDS);
+// ---------- leagues ----------
+
+export type LeagueKey = "sprint" | "hour" | "day" | "week" | "month" | "open";
+export interface League {
+  key: LeagueKey;
+  id: number;
+  /** Tab label. */
+  label: string;
+  /** How a round of this league reads in a sentence ("a 1-hour round"). */
+  noun: string;
+  /** Nominal length, for display; the Open league has none. */
+  seconds: number | null;
 }
 
-export function roundTimes(roundId: number): { start: number; end: number } {
-  const start = roundId * ROUND_SECONDS;
-  return { start, end: start + TRADING_SECONDS };
+/** Every league runs its own rounds with its own leaderboard and winners. Sprint rounds keep the
+ *  ids they always had (unix time / 900); the other leagues' ids start at `league id * 2^40`. */
+export const LEAGUES: League[] = [
+  { key: "sprint", id: 0, label: "15 min", noun: "15-minute", seconds: 900 },
+  { key: "hour", id: 1, label: "1 hour", noun: "1-hour", seconds: 3_600 },
+  { key: "day", id: 2, label: "1 day", noun: "1-day", seconds: 86_400 },
+  { key: "week", id: 3, label: "1 week", noun: "1-week", seconds: 604_800 },
+  { key: "month", id: 4, label: "1 month", noun: "1-month", seconds: 30 * 86_400 },
+  { key: "open", id: 5, label: "Open", noun: "open-ended", seconds: null },
+];
+export const LEAGUE = Object.fromEntries(LEAGUES.map((l) => [l.key, l])) as Record<LeagueKey, League>;
+
+const LEAGUE_BASE = 2 ** 40;
+/** Trading stops this long before a period ends, so settling never overlaps the next round. */
+export const SETTLE_SECONDS = ROUND_SECONDS - TRADING_SECONDS;
+/** Weeks start on Monday 00:00 UTC (1970-01-05 was a Monday). */
+const WEEK_ORIGIN = 4 * 86_400;
+/** The Open league is one round, from 8 November 2026 for ten years. */
+export const OPEN_START = Date.UTC(2026, 10, 8) / 1000;
+export const OPEN_SECONDS = 3_650 * 86_400;
+
+export function leagueOf(roundId: number): League {
+  return roundId < LEAGUE_BASE ? LEAGUE.sprint : (LEAGUES[Math.floor(roundId / LEAGUE_BASE)] ?? LEAGUE.sprint);
+}
+
+/** The round of a league that is under way (or about to start) at a unix time. */
+export function roundIdAt(unixSeconds: number, league: LeagueKey = "sprint"): number {
+  const base = LEAGUE[league].id * LEAGUE_BASE;
+  switch (league) {
+    case "sprint":
+      return Math.floor(unixSeconds / ROUND_SECONDS);
+    case "hour":
+      return base + Math.floor(unixSeconds / 3_600);
+    case "day":
+      return base + Math.floor(unixSeconds / 86_400);
+    case "week":
+      return base + Math.floor((unixSeconds - WEEK_ORIGIN) / 604_800);
+    case "month": {
+      const d = new Date(unixSeconds * 1000);
+      return base + (d.getUTCFullYear() - 1970) * 12 + d.getUTCMonth();
+    }
+    case "open":
+      return base;
+  }
+}
+
+/** When a round starts, when its trading ends, and when its period is over (the next round's start). */
+export function roundTimes(roundId: number): { start: number; end: number; next: number } {
+  const league = leagueOf(roundId);
+  const n = roundId - league.id * LEAGUE_BASE;
+  let start: number;
+  let next: number;
+  switch (league.key) {
+    case "sprint":
+      start = roundId * ROUND_SECONDS;
+      next = start + ROUND_SECONDS;
+      break;
+    case "hour":
+      start = n * 3_600;
+      next = start + 3_600;
+      break;
+    case "day":
+      start = n * 86_400;
+      next = start + 86_400;
+      break;
+    case "week":
+      start = n * 604_800 + WEEK_ORIGIN;
+      next = start + 604_800;
+      break;
+    case "month":
+      start = Date.UTC(1970 + Math.floor(n / 12), n % 12, 1) / 1000;
+      next = Date.UTC(1970 + Math.floor(n / 12), (n % 12) + 1, 1) / 1000;
+      break;
+    case "open":
+      return { start: OPEN_START, end: OPEN_START + OPEN_SECONDS, next: Infinity };
+  }
+  return { start, end: next - SETTLE_SECONDS, next };
 }
 
 // ---------- instructions ----------
@@ -330,6 +419,21 @@ export function closeRoundIx(args: { programId: PublicKey; round: PublicKey; aut
   });
 }
 
+/** House only: moves an unfinished round to another price source (shard and price age limit). */
+export function setPriceSourceIx(args: {
+  programId: PublicKey;
+  round: PublicKey;
+  authority: PublicKey;
+  shardId: number;
+  maxPriceAge: number;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: args.programId,
+    keys: [meta(args.round, false, true), meta(args.authority, true, false)],
+    data: concat(IX.setPriceSource, u16le(args.shardId), u16le(args.maxPriceAge)),
+  });
+}
+
 export function memoIx(text: string): TransactionInstruction {
   return new TransactionInstruction({
     programId: MEMO_PROGRAM_ID,
@@ -427,7 +531,7 @@ export interface Entrant {
   kind: number;
   label: string;
   cash: number; // dollars
-  qty: [number, number, number]; // whole coins
+  qty: [number, number, number]; // whole coins, negative for a short
   trades: number;
   joinedTs: number;
   lastTradeTs: number;
@@ -440,7 +544,9 @@ export function decodeEntrant(data: Uint8Array): Entrant | null {
   if (data.length < ENTRANT_SIZE || !hasDisc(data, ACCOUNT.entrant)) return null;
   const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const u64 = (o: number) => dv.getBigUint64(o, true);
-  const coins = (o: number) => Number((u64(o) * 1_000_000n) / QTY_SCALE) / 1_000_000;
+  // Positions are signed (negative is a short), in billionths of a coin; a double holds them
+  // exactly up to 9 million coins.
+  const coins = (o: number) => Number(dv.getBigInt64(o, true)) / Number(QTY_SCALE);
   return {
     round: pk(data, 8),
     player: pk(data, 40),
@@ -489,7 +595,7 @@ export function equityOf(e: Pick<Entrant, "cash" | "qty">, prices: [number, numb
 
 /** The program's error messages, in the order of its error enum (Anchor numbers them from 6000). */
 export const PIT_ERRORS = [
-  "The round must end after it starts and last at most a day",
+  "The round must end after it starts and last at most ten years",
   "A parameter is out of range",
   "Joining is closed for this round",
   "This round is full",
@@ -500,7 +606,7 @@ export const PIT_ERRORS = [
   "Trade is below the $10 minimum",
   "Not enough cash",
   "Nothing to sell",
-  "That would put more than half your equity in one asset",
+  "That would make one position, long or short, more than half your equity",
   "Wrong or malformed price account",
   "Price must be positive",
   "Price is too old; try again in a few seconds",
@@ -515,6 +621,7 @@ export const PIT_ERRORS = [
   "Only the player can close this account until three hours after the round",
   "Every player's account must be closed first",
   "A round can be closed six hours after it ends",
+  "Your equity is gone: you can only close or reduce positions",
 ];
 
 /** Turns a transaction error into something a player can read. */
@@ -545,27 +652,32 @@ export const PERSONAS: Persona[] = [
   {
     label: "Claude Momentum",
     style:
-      "You are a momentum trader. You buy what has been rising over the last few minutes and cut what is falling. You size up when a move is clean and you never fight the trend.",
+      "You are a momentum trader. You go long what has been rising and short what has been falling. You size up when a move is clean and you never fight the trend.",
   },
   {
     label: "Claude Contrarian",
     style:
-      "You are a contrarian. You buy sharp dips and trim after spikes, expecting short moves to snap back. You stay patient and keep some cash for the next overreaction.",
+      "You are a contrarian. You buy sharp dips and short sharp spikes, expecting moves to snap back. You stay patient and keep some cash for the next overreaction.",
   },
   {
     label: "Claude Degen",
     style:
-      "You are an aggressive risk-taker. You make concentrated bets, swing for the win, and hate sitting in cash when you are behind on the leaderboard.",
+      "You are an aggressive risk-taker. You make concentrated bets, long or short, swing for the win, and hate sitting in cash when you are behind on the leaderboard.",
   },
 ];
 
-/** The full system prompt an agent runs with. */
-export function agentSystemPrompt(persona: Persona): string {
+/** The full system prompt an agent runs with, for a league. */
+export function agentSystemPrompt(persona: Persona, league: League = LEAGUE.sprint): string {
+  const open = league.key === "open";
   return [
-    `You are ${persona.label}, an AI trader in Turing Pit: a live 14-minute paper-trading round on Solana where AI agents compete against humans.`,
+    `You are ${persona.label}, an AI trader in Turing Pit, where AI agents and humans compete in paper trading on Solana.`,
+    open
+      ? "You are playing the Open league: one round with no end, where the highest equity leads."
+      : `You are playing a ${league.noun} round: the highest equity when trading stops wins.`,
     persona.style,
-    "Rules: long only (buy, sell or hold) in SOL, BTC or ETH at live Pyth prices. Every entrant starts with $10,000. Trades cost 0.1%.",
-    "No single asset may exceed 50% of your equity. Minimum trade $10. The highest equity when the round ends wins.",
+    "Rules: trade SOL, BTC or ETH at live Pyth prices, long or short. Buy to go long or to cover a short; sell to cut a long, and sell more than you hold to go short; close to flatten a whole position.",
+    "Every entrant starts with $10,000. Trades cost 0.1%. No single position, long or short, may exceed 50% of your equity. Minimum trade $10.",
+    "Only players who trade can win, so sitting in cash all round never wins.",
     "Your reason is published on chain next to your trade, so make it sharp, specific and under 200 characters.",
     "Call the decide tool exactly once.",
   ].join(" ");

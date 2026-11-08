@@ -34,19 +34,46 @@ pub fn qty_to_usd(qty: u64, price: u64) -> Result<u64> {
     u64::try_from(v).map_err(|_| error!(PitError::MathOverflow))
 }
 
-pub fn equity_of(cash: u64, qty: &[u64; NUM_ASSETS], prices: &[u64; NUM_ASSETS]) -> Result<u64> {
-    let mut total = cash;
+/// Micro-USD value of a signed position: positive for a long, negative for a short.
+pub fn position_value(qty: i64, price: u64) -> Result<i128> {
+    let v = (qty.unsigned_abs() as u128)
+        .checked_mul(price as u128)
+        .ok_or(PitError::MathOverflow)?
+        / QTY_SCALE;
+    let v = i128::try_from(v).map_err(|_| error!(PitError::MathOverflow))?;
+    Ok(if qty < 0 { -v } else { v })
+}
+
+/// Cash plus the value of every position, longs adding and shorts subtracting. It can go
+/// below zero when shorts run against the player.
+pub fn equity_of(cash: u64, qty: &[i64; NUM_ASSETS], prices: &[u64; NUM_ASSETS]) -> Result<i128> {
+    let mut total = cash as i128;
     for i in 0..NUM_ASSETS {
         total = total
-            .checked_add(qty_to_usd(qty[i], prices[i])?)
+            .checked_add(position_value(qty[i], prices[i])?)
             .ok_or(PitError::MathOverflow)?;
     }
     Ok(total)
 }
 
-/// True when `position` is at most `cap_bps` of `equity`.
-pub fn within_cap(position: u64, equity: u64, cap_bps: u64) -> bool {
-    (position as u128) * 10_000 <= (equity as u128) * (cap_bps as u128)
+/// True when a position worth `position` (either side) is at most `cap_bps` of `equity`, and
+/// there is equity left at all.
+pub fn within_cap(position: i128, equity: i128, cap_bps: u64) -> bool {
+    equity > 0
+        && position
+            .unsigned_abs()
+            .checked_mul(10_000)
+            .is_some_and(|p| p <= (equity as u128).saturating_mul(cap_bps as u128))
+}
+
+/// Coins as a signed quantity.
+pub fn to_signed(qty: u64) -> Result<i64> {
+    i64::try_from(qty).map_err(|_| error!(PitError::MathOverflow))
+}
+
+/// True when going from `old` to `new` adds risk: the position grows, or flips to the other side.
+pub fn adds_risk(old: i64, new: i64) -> bool {
+    new.unsigned_abs() > old.unsigned_abs() || (old != 0 && new != 0 && (old < 0) != (new < 0))
 }
 
 /// Converts a Pyth price with its exponent to micro-USD per coin.
@@ -91,9 +118,42 @@ mod tests {
         let prices = [150 * USD, 100_000 * USD, 4_000 * USD];
         let qty = [10_000_000_000, 10_000_000, 0]; // 10 SOL, 0.01 BTC
         let equity = equity_of(7_500 * USD, &qty, &prices).unwrap();
-        assert_eq!(equity, 10_000 * USD);
-        assert!(within_cap(5_000 * USD, equity, 5_000));
-        assert!(!within_cap(5_000 * USD + 1, equity, 5_000));
+        assert_eq!(equity, (10_000 * USD) as i128);
+        assert!(within_cap((5_000 * USD) as i128, equity, 5_000));
+        assert!(!within_cap((5_000 * USD + 1) as i128, equity, 5_000));
+    }
+
+    #[test]
+    fn shorts_subtract_and_cap_both_sides() {
+        let prices = [150 * USD, 100_000 * USD, 4_000 * USD];
+        // Short 20 SOL ($3,000) after starting with $10,000: cash is $13,000.
+        let qty = [-20_000_000_000, 0, 0];
+        assert_eq!(position_value(qty[0], prices[0]).unwrap(), -((3_000 * USD) as i128));
+        let equity = equity_of(13_000 * USD, &qty, &prices).unwrap();
+        assert_eq!(equity, (10_000 * USD) as i128);
+        // The cap applies to the size of a short as to a long.
+        assert!(within_cap(-((5_000 * USD) as i128), equity, 5_000));
+        assert!(!within_cap(-((5_000 * USD + 1) as i128), equity, 5_000));
+        // SOL doubles: the short loses $3,000.
+        let up = [300 * USD, 100_000 * USD, 4_000 * USD];
+        assert_eq!(equity_of(13_000 * USD, &qty, &up).unwrap(), (7_000 * USD) as i128);
+        // SOL at $800 wipes the account out, and nothing more can be added.
+        let wiped = [800 * USD, 100_000 * USD, 4_000 * USD];
+        let e = equity_of(13_000 * USD, &qty, &wiped).unwrap();
+        assert!(e < 0);
+        assert!(!within_cap(0, e, 5_000));
+    }
+
+    #[test]
+    fn risk_direction() {
+        assert!(adds_risk(0, 5));
+        assert!(adds_risk(0, -5));
+        assert!(adds_risk(5, 7));
+        assert!(adds_risk(-5, -7));
+        assert!(adds_risk(5, -1)); // flips from long to short
+        assert!(!adds_risk(5, 3));
+        assert!(!adds_risk(-5, -3));
+        assert!(!adds_risk(-5, 0));
     }
 
     #[test]

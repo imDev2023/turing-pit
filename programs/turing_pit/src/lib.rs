@@ -1,8 +1,8 @@
 //! Turing Pit: AI agents and humans trade the same live markets in short rounds.
 //!
 //! Every entrant starts a round with the same paper cash. Trades fill on chain at the
-//! Pyth price for SOL, BTC or ETH, read from verified Pyth price accounts. The program
-//! enforces the rules (round window, cash, a cap on any one asset), records each trade
+//! Pyth price for SOL, BTC or ETH, read from verified Pyth price accounts, long or short. The
+//! program enforces the rules (round window, cash, a cap on any one position), records each trade
 //! with a hash of the trader's stated reason, marks every entrant to market when the
 //! round ends, and names the winner.
 
@@ -43,8 +43,19 @@ pub const FEED_IDS: [[u8; 32]; NUM_ASSETS] = [
 
 pub const KIND_HUMAN: u8 = 0;
 pub const KIND_AGENT: u8 = 1;
+/// Buy `usd` of cash worth: adds to a long, or covers a short.
 pub const SIDE_BUY: u8 = 0;
+/// Sell `usd` worth: reduces a long, and past zero opens or adds to a short.
 pub const SIDE_SELL: u8 = 1;
+/// Close the whole position in the asset, long or short (`usd` is ignored).
+pub const SIDE_CLOSE: u8 = 2;
+
+/// Longest round: ten years, which is how the Open league (a round with no practical end) is
+/// made. The other leagues run from fifteen minutes to a month.
+pub const MAX_ROUND_SECS: i64 = 10 * 366 * 86_400;
+/// Rounds longer than this are open-ended: they take any number of players and are never
+/// finalized (finalizing needs every entrant in one transaction).
+pub const OPEN_ROUND_SECS: i64 = 40 * 86_400;
 
 /// Smallest trade: $10, in micro-USD.
 pub const MIN_TRADE_USD: u64 = 10_000_000;
@@ -84,7 +95,7 @@ pub mod turing_pit {
         max_price_age: u16,
     ) -> Result<()> {
         require!(end_ts > start_ts, PitError::BadSchedule);
-        require!(end_ts - start_ts <= 86_400, PitError::BadSchedule);
+        require!(end_ts - start_ts <= MAX_ROUND_SECS, PitError::BadSchedule);
         require!(fee_bps <= 100, PitError::BadParams);
         require!(
             (1_000..=10_000).contains(&max_asset_bps),
@@ -134,6 +145,33 @@ pub mod turing_pit {
         Ok(())
     }
 
+    /// Moves an unfinished round to another Pyth price source: the house's own shard, or Pyth's
+    /// sponsored feeds. Long rounds outlive any one source, so the house switches them when its
+    /// keeper starts or stops posting and trades keep filling. House only; emitted as an event.
+    pub fn set_price_source(
+        ctx: Context<SetPriceSource>,
+        shard_id: u16,
+        max_price_age: u16,
+    ) -> Result<()> {
+        require!(
+            (MIN_PRICE_AGE..=MAX_PRICE_AGE).contains(&max_price_age),
+            PitError::BadParams
+        );
+        let round = &mut ctx.accounts.round;
+        require!(!round.finalized, PitError::AlreadyFinalized);
+        round.shard_id = shard_id;
+        for (i, feed) in FEED_IDS.iter().enumerate() {
+            round.feeds[i] = price_feed_account(shard_id, feed);
+        }
+        round.max_price_age = max_price_age;
+        emit!(PriceSourceChanged {
+            round: round.key(),
+            shard_id,
+            max_price_age,
+        });
+        Ok(())
+    }
+
     /// Joins a round with the round's starting cash. Agents must be co-signed by the house.
     pub fn join_round(ctx: Context<JoinRound>, kind: u8, label: [u8; 24]) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
@@ -142,7 +180,10 @@ pub mod turing_pit {
         let round = &mut ctx.accounts.round;
 
         require!(now < round.end_ts - JOIN_CUTOFF_SECS, PitError::RoundClosed);
-        require!(round.entrants < MAX_ENTRANTS, PitError::RoundFull);
+        require!(
+            round.entrants < MAX_ENTRANTS || round.end_ts - round.start_ts > OPEN_ROUND_SECS,
+            PitError::RoundFull
+        );
         require!(kind == KIND_HUMAN || kind == KIND_AGENT, PitError::BadParams);
         if kind == KIND_AGENT {
             let registrar = ctx
@@ -184,8 +225,11 @@ pub mod turing_pit {
         Ok(())
     }
 
-    /// Buys or sells one asset at the live Pyth price. `usd` is micro-USD: cash to spend on a
-    /// buy, or value to sell on a sell (more than the position sells all of it).
+    /// Trades one asset at the live Pyth price, long or short. `usd` is micro-USD: cash to
+    /// spend on a buy (which covers a short before it adds to a long), or value to sell on a
+    /// sell (which past the holding opens a short). `SIDE_CLOSE` closes the whole position.
+    /// Any trade that adds risk must leave the position, long or short, within the round's cap
+    /// of the player's equity, and needs equity above zero; closing and reducing always work.
     /// `reason_hash` is the sha256 of the trader's stated reason, which agents post as a memo
     /// in the same transaction.
     pub fn trade(
@@ -198,8 +242,11 @@ pub mod turing_pit {
         let now = Clock::get()?.unix_timestamp;
         let a = asset as usize;
         require!(a < NUM_ASSETS, PitError::BadAsset);
-        require!(side == SIDE_BUY || side == SIDE_SELL, PitError::BadParams);
-        require!(usd >= MIN_TRADE_USD, PitError::TradeTooSmall);
+        require!(
+            side == SIDE_BUY || side == SIDE_SELL || side == SIDE_CLOSE,
+            PitError::BadParams
+        );
+        require!(side == SIDE_CLOSE || usd >= MIN_TRADE_USD, PitError::TradeTooSmall);
 
         let round = &ctx.accounts.round;
         require!(
@@ -223,42 +270,59 @@ pub mod turing_pit {
 
         let entrant_key = ctx.accounts.entrant.key();
         let entrant = &mut ctx.accounts.entrant;
-        let (qty_moved, usd_moved, fee) = if side == SIDE_BUY {
-            require!(entrant.cash >= usd, PitError::NotEnoughCash);
-            let fee = mul_div(usd, fee_bps, 10_000)?;
-            let qty = usd_to_qty(usd - fee, price)?;
-            require!(qty > 0, PitError::TradeTooSmall);
-            entrant.cash -= usd;
-            entrant.qty[a] = entrant
-                .qty[a]
-                .checked_add(qty)
-                .ok_or(PitError::MathOverflow)?;
+        let old = entrant.qty[a];
+        // Each branch moves cash and returns the coins bought (+) or sold (-), the coins moved,
+        // the dollars moved and the fee.
+        let (delta, qty_moved, usd_moved, fee) = match side {
+            SIDE_BUY => {
+                // `usd` is the whole spend; the fee comes out of it.
+                require!(entrant.cash >= usd, PitError::NotEnoughCash);
+                let fee = mul_div(usd, fee_bps, 10_000)?;
+                let qty = usd_to_qty(usd - fee, price)?;
+                require!(qty > 0, PitError::TradeTooSmall);
+                entrant.cash -= usd;
+                (to_signed(qty)?, qty, usd, fee)
+            }
+            SIDE_SELL => {
+                // Proceeds come in less the fee; selling past the holding opens a short.
+                let qty = usd_to_qty(usd, price)?;
+                require!(qty > 0, PitError::TradeTooSmall);
+                let proceeds = qty_to_usd(qty, price)?;
+                let fee = mul_div(proceeds, fee_bps, 10_000)?;
+                entrant.cash = entrant
+                    .cash
+                    .checked_add(proceeds - fee)
+                    .ok_or(PitError::MathOverflow)?;
+                (-to_signed(qty)?, qty, proceeds, fee)
+            }
+            _ => {
+                require!(old != 0, PitError::NothingToSell);
+                let qty = old.unsigned_abs();
+                let value = qty_to_usd(qty, price)?;
+                let fee = mul_div(value, fee_bps, 10_000)?;
+                if old > 0 {
+                    entrant.cash = entrant
+                        .cash
+                        .checked_add(value - fee)
+                        .ok_or(PitError::MathOverflow)?;
+                } else {
+                    // Buying a short back costs its value and the fee.
+                    let cost = value.checked_add(fee).ok_or(PitError::MathOverflow)?;
+                    require!(entrant.cash >= cost, PitError::NotEnoughCash);
+                    entrant.cash -= cost;
+                }
+                (old.checked_neg().ok_or(PitError::MathOverflow)?, qty, value, fee)
+            }
+        };
+        entrant.qty[a] = old.checked_add(delta).ok_or(PitError::MathOverflow)?;
+        if adds_risk(old, entrant.qty[a]) {
             let equity = equity_of(entrant.cash, &entrant.qty, &prices)?;
-            let position = qty_to_usd(entrant.qty[a], price)?;
+            require!(equity > 0, PitError::Bust);
             require!(
-                within_cap(position, equity, max_asset_bps),
+                within_cap(position_value(entrant.qty[a], price)?, equity, max_asset_bps),
                 PitError::PositionTooLarge
             );
-            (qty, usd, fee)
-        } else {
-            let held = entrant.qty[a];
-            require!(held > 0, PitError::NothingToSell);
-            let held_value = qty_to_usd(held, price)?;
-            let qty_sell = if usd >= held_value {
-                held
-            } else {
-                usd_to_qty(usd, price)?.min(held)
-            };
-            require!(qty_sell > 0, PitError::TradeTooSmall);
-            let proceeds = qty_to_usd(qty_sell, price)?;
-            let fee = mul_div(proceeds, fee_bps, 10_000)?;
-            entrant.qty[a] = held - qty_sell;
-            entrant.cash = entrant
-                .cash
-                .checked_add(proceeds - fee)
-                .ok_or(PitError::MathOverflow)?;
-            (qty_sell, proceeds, fee)
-        };
+        }
         entrant.trades += 1;
         entrant.last_trade_ts = now;
         entrant.last_reason_hash = reason_hash;
@@ -299,7 +363,9 @@ pub mod turing_pit {
         let entrant_key = ctx.accounts.entrant.key();
         let entrant = &mut ctx.accounts.entrant;
         require!(!entrant.settled, PitError::AlreadySettled);
-        entrant.final_equity = equity_of(entrant.cash, &entrant.qty, &prices)?;
+        // A player wiped out by shorts finishes at zero.
+        let equity = equity_of(entrant.cash, &entrant.qty, &prices)?.max(0);
+        entrant.final_equity = u64::try_from(equity).map_err(|_| error!(PitError::MathOverflow))?;
         entrant.settled = true;
         let final_equity = entrant.final_equity;
 
@@ -314,7 +380,8 @@ pub mod turing_pit {
     }
 
     /// Names the winner once every entrant is settled. Anyone can call it, but it must be
-    /// given every entrant of the round, each once.
+    /// given every entrant of the round, each once. Only players who traded can win or place;
+    /// when nobody traded, the round has no winner.
     pub fn finalize_round(ctx: Context<FinalizeRound>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let round_key = ctx.accounts.round.key();
@@ -340,6 +407,10 @@ pub mod turing_pit {
             let entrant = Entrant::try_deserialize(&mut &data[..])?;
             require_keys_eq!(entrant.round, round_key, PitError::BadEntrant);
             require!(entrant.settled, PitError::NotSettled);
+            // Only players who traded can win or place: sitting in cash all round is no win.
+            if entrant.trades == 0 {
+                continue;
+            }
             if winner == Pubkey::default() || entrant.final_equity > winner_equity {
                 winner = entrant.player;
                 winner_equity = entrant.final_equity;
@@ -488,6 +559,13 @@ pub struct CreateRound<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetPriceSource<'info> {
+    #[account(mut, has_one = authority)]
+    pub round: Account<'info, Round>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct JoinRound<'info> {
     #[account(mut)]
     pub round: Account<'info, Round>,
@@ -605,8 +683,9 @@ pub struct Entrant {
     pub label: [u8; 24],
     /// Cash, micro-USD.
     pub cash: u64,
-    /// Holdings per asset, in billionths of a coin.
-    pub qty: [u64; NUM_ASSETS],
+    /// Position per asset, in billionths of a coin: positive long, negative short. Same bytes as
+    /// the unsigned holdings of accounts made before shorts existed.
+    pub qty: [i64; NUM_ASSETS],
     pub trades: u32,
     pub joined_ts: i64,
     pub last_trade_ts: i64,
@@ -623,6 +702,13 @@ pub struct RoundCreated {
     pub start_ts: i64,
     pub end_ts: i64,
     pub start_cash: u64,
+}
+
+#[event]
+pub struct PriceSourceChanged {
+    pub round: Pubkey,
+    pub shard_id: u16,
+    pub max_price_age: u16,
 }
 
 #[event]
@@ -668,7 +754,7 @@ pub struct Finalized {
 
 #[error_code]
 pub enum PitError {
-    #[msg("The round must end after it starts and last at most a day")]
+    #[msg("The round must end after it starts and last at most ten years")]
     BadSchedule,
     #[msg("A parameter is out of range")]
     BadParams,
@@ -720,6 +806,8 @@ pub enum PitError {
     PlayersStillOpen,
     #[msg("A round can be closed six hours after it ends")]
     RoundTooRecent,
+    #[msg("Your equity is gone: you can only close or reduce positions")]
+    Bust,
 }
 
 #[cfg(test)]

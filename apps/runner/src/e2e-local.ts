@@ -19,6 +19,7 @@ import {
   SHARD_ID,
   SPONSORED_SHARD_ID,
   SIDE_BUY,
+  SIDE_CLOSE,
   SIDE_SELL,
   bytesToHex,
   closeEntrantIx,
@@ -40,6 +41,7 @@ import {
   ROUND_CLOSE_DELAY_SECONDS,
   roundIdAt,
   roundPda,
+  setPriceSourceIx,
   settleIx,
   tradeIx,
   type Entrant,
@@ -160,7 +162,18 @@ async function main() {
   const agent = keys.agents[0];
   const human = Keypair.generate();
   const late = Keypair.generate();
-  await fund(house.publicKey, agent.publicKey, keys.agents[1].publicKey, keys.agents[2].publicKey, human.publicKey, late.publicKey);
+  const idle = Keypair.generate();
+  const trader = Keypair.generate();
+  await fund(
+    house.publicKey,
+    agent.publicKey,
+    keys.agents[1].publicKey,
+    keys.agents[2].publicKey,
+    human.publicKey,
+    late.publicKey,
+    idle.publicKey,
+    trader.publicKey,
+  );
   const send = (ixs: TransactionInstruction[], signers: Keypair[], computeUnits?: number) =>
     sendIxs(connection, ixs, signers, { computeUnits });
 
@@ -192,6 +205,37 @@ async function main() {
     check("a round on Pyth's sponsored feeds accepts it", (await entrant(programId, relaxed, human.publicKey)).trades === 1);
   }
 
+  console.log("leagues");
+  {
+    const t0 = await chainTime();
+    const week = roundPda(programId, house.publicKey, 6_000_005);
+    await send([createRoundIx({ programId, authority: house.publicKey, roundId: 6_000_005, startTs: t0 - 5, endTs: t0 + 7 * 86_400 })], [house]);
+    check("a week-long round opens", decodeRound((await connection.getAccountInfo(week))!.data)?.endTs === t0 + 7 * 86_400);
+    await send([createRoundIx({ programId, authority: house.publicKey, roundId: 6_000_006, startTs: t0 - 5, endTs: t0 + 3_650 * 86_400 })], [house]);
+    check("so does a ten-year round, the Open league", !!(await connection.getAccountInfo(roundPda(programId, house.publicKey, 6_000_006))));
+    await expectFail(
+      "nothing longer than ten years",
+      send([createRoundIx({ programId, authority: house.publicKey, roundId: 6_000_007, startTs: t0, endTs: t0 + 3_661 * 86_400 })], [house]),
+      msgOf(6000),
+    );
+    const switchTo = (by: Keypair) =>
+      setPriceSourceIx({ programId, round: week, authority: by.publicKey, shardId: SPONSORED_SHARD_ID, maxPriceAge: PRICE_AGE_SPONSORED });
+    await expectFail("only the house moves a round to another price source", send([switchTo(human)], [human]), /0x7d1|ConstraintHasOne|has one/i);
+    await send([switchTo(house)], [house]);
+    const w = decodeRound((await connection.getAccountInfo(week))!.data)!;
+    check(
+      "the house moves a long round to Pyth's sponsored feeds",
+      w.shardId === SPONSORED_SHARD_ID && w.maxPriceAge === PRICE_AGE_SPONSORED && w.feeds.every((f, i) => f.equals(feedAccount(ASSETS[i], SPONSORED_SHARD_ID))),
+      w,
+    );
+    await send([joinRoundIx({ programId, round: week, player: human.publicKey, kind: KIND_HUMAN, label: "Farhan" })], [human]);
+    await send(
+      [tradeIx({ programId, round: week, player: human.publicKey, asset: "BTC", side: SIDE_SELL, usd: 500, reasonHash: reasonHash("x"), shardId: SPONSORED_SHARD_ID })],
+      [human],
+    );
+    check("and trades fill there, a short included", (await entrant(programId, week, human.publicKey)).qty[1] < 0);
+  }
+
   console.log("create_round");
   const now = await chainTime();
   const roundId = 7_000_000 + (now % 100_000);
@@ -211,6 +255,17 @@ async function main() {
     "a round must end after it starts",
     send([createRoundIx({ programId, authority: house.publicKey, roundId: roundId + 1, startTs: end, endTs: start })], [house]),
     msgOf(6000),
+  );
+
+  // A second round with the same end: one player never trades, the other loses a little to fees.
+  const quiet = roundPda(programId, house.publicKey, roundId + 2);
+  await send([createRoundIx({ programId, authority: house.publicKey, roundId: roundId + 2, startTs: start, endTs: end })], [house]);
+  for (const [who, label] of [[idle, "idle"], [trader, "trader"]] as const) {
+    await send([joinRoundIx({ programId, round: quiet, player: who.publicKey, kind: KIND_HUMAN, label })], [who]);
+  }
+  await send(
+    [tradeIx({ programId, round: quiet, player: trader.publicKey, asset: "SOL", side: SIDE_BUY, usd: 100, reasonHash: reasonHash("x") })],
+    [trader],
   );
 
   console.log("join_round");
@@ -261,14 +316,28 @@ async function main() {
   await expectFail("no more than half of equity in one coin", send(buy(5000, "SOL"), [human]), msgOf(6011));
   await send(buy(4000, "BTC"), [human]);
   await expectFail("can't spend more cash than you have", send(buy(6000, "ETH"), [human]), new RegExp(`${msgOf(6009)}|${msgOf(6011)}`));
-  await expectFail("can't sell what you don't hold", send(sell(100, "ETH"), [human]), msgOf(6010));
+  const close = (asset: (typeof ASSETS)[number], who = human) => [
+    memoIx("flat"),
+    tradeIx({ programId, round, player: who.publicKey, asset, side: SIDE_CLOSE, usd: 0, reasonHash: reasonHash("flat") }),
+  ];
+  const cashBefore = (await entrant(programId, round, human.publicKey)).cash;
+  await send(sell(1000, "ETH"), [human]);
+  h = await entrant(programId, round, human.publicKey);
+  check("selling what you don't hold opens a short", Math.abs(h.qty[2] * PRICES[2] + 1000) < 0.01, h.qty[2]);
+  check("and takes in the proceeds less the fee", Math.abs(h.cash - cashBefore - 999) < 0.01, h.cash - cashBefore);
+  check("the short counts against equity", Math.abs(equityOf(h, PRICES) - (10_000 - 1 - 4 - 1)) < 0.01, equityOf(h, PRICES));
+  await expectFail("a short is capped at half of equity too", send(sell(4500, "ETH"), [human]), msgOf(6011));
+  await send(close("ETH"), [human]);
+  h = await entrant(programId, round, human.publicKey);
+  check("close buys the short back", h.qty[2] === 0 && Math.abs(h.cash - (cashBefore - 2)) < 0.01, { qty: h.qty[2], cash: h.cash - cashBefore });
+  await expectFail("nothing to close when flat", send(close("ETH"), [human]), msgOf(6010));
   await send(sell(500, "SOL"), [human]);
   h = await entrant(programId, round, human.publicKey);
   check("partial sell leaves the rest", Math.abs(h.qty[0] * PRICES[0] - (999 - 500)) < 0.01, h.qty[0] * PRICES[0]);
-  await send(sell(1_000_000, "SOL"), [human]);
+  await send(close("SOL"), [human]);
   h = await entrant(programId, round, human.publicKey);
-  check("selling more than you hold sells everything", h.qty[0] === 0, h.qty[0]);
-  check("trade count", h.trades === 4, h.trades);
+  check("close sells a long exactly", h.qty[0] === 0, h.qty[0]);
+  check("trade count", h.trades === 6, h.trades);
 
   const agentWhy = "ETH flat while SOL ran: buying the laggard";
   await send(buy(2000, "ETH", agentWhy, agent), [agent]);
@@ -310,7 +379,7 @@ async function main() {
   const r1 = decodeRound((await connection.getAccountInfo(round))!.data)!;
   h = await entrant(programId, round, human.publicKey);
   const ag = await entrant(programId, round, agent.publicKey);
-  const expectHuman = 10_000 - 1 - 4 - 0.5 - 0.499;
+  const expectHuman = 10_000 - 1 - 4 - 2 - 0.5 - 0.499;
   check("human's final equity is cash plus holdings minus fees", Math.abs(h.finalEquity - expectHuman) < 0.01, h.finalEquity);
   check("agent's final equity", Math.abs(ag.finalEquity - (10_000 - 2)) < 0.01, ag.finalEquity);
   check("final equity matches the client's own math", Math.abs(equityOf(ag, PRICES) - ag.finalEquity) < 0.01);
@@ -318,6 +387,15 @@ async function main() {
   check("the agent won", r1.winner.equals(agent.publicKey) && r1.winnerKind === KIND_AGENT, r1.winner.toBase58());
   check("best human and best agent are recorded", Math.abs(r1.bestHumanEquity - expectHuman) < 0.01 && Math.abs(r1.bestAgentEquity - 9998) < 0.01, r1);
   await expectFail("finalize only once", send([finalizeRoundIx({ programId, round, entrants })], [house]), msgOf(6017));
+  const quietEntrants = [idle, trader].map((w) => entrantPda(programId, quiet, w.publicKey));
+  await send(quietEntrants.map((e) => settleIx({ programId, round: quiet, entrant: e })), [house], 400_000);
+  await send([finalizeRoundIx({ programId, round: quiet, entrants: quietEntrants })], [house], 400_000);
+  const rq = decodeRound((await connection.getAccountInfo(quiet))!.data)!;
+  check(
+    "sitting in cash all round doesn't win: the player who traded does, $0.10 down",
+    rq.winner.equals(trader.publicKey) && Math.abs(rq.winnerEquity - 9_999.9) < 0.01,
+    { winner: rq.winner.toBase58(), equity: rq.winnerEquity },
+  );
   await expectFail(
     "others can't close a player's account until three hours after the round",
     send([closeEntrantIx({ programId, round, player: human.publicKey, closer: house.publicKey })], [house]),
