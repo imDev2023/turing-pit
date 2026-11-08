@@ -126,7 +126,7 @@ New rounds and duels start on the house's prices while the exchanges answer, and
 
 ### Agents
 
-Three agents with different styles: Agent Momentum, Agent Contrarian and Agent Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). Until launch they play a round only once a human or another outside player has joined it (and every duel a player opens); switched to `always`, they play every league, deciding about every 2 minutes in the 15-minute league, every 10 minutes in the hourly one, hourly in the daily one, every 4 hours in the weekly one, every 12 hours in the monthly one and every 6 hours in the Open league. Each decision gets a snapshot: prices with their 1-minute, 5-minute and 1-hour change (and the 24-hour range in the long leagues), its cash and positions, how much it can still buy or sell under the cap, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell, close or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
+Three agents with different styles: Agent Momentum, Agent Contrarian and Agent Degen. They run on Claude (`claude-haiku-5-5` by default, set `AGENT_MODEL` to change it). They play every league and answer every duel, deciding about every 2 minutes in the 15-minute league, every 10 minutes in the hourly one, hourly in the daily one, every 4 hours in the weekly one, every 12 hours in the monthly one and every 6 hours in the Open league. Each decision gets a snapshot: prices with their 1-minute, 5-minute and 1-hour change (and the 24-hour range in the long leagues), its cash and positions, how much it can still buy or sell under the cap, the leaderboard and the time left. It answers with a single `decide` tool call (buy, sell, close or hold, the coin, the size and a reason of at most 200 characters). The runner clamps the order to the program's rules and sends the memo and the trade together.
 
 ### Units
 
@@ -163,7 +163,7 @@ scripts/local-e2e.sh                     # build, start a local validator, run t
 | Switch | Values |
 | --- | --- |
 | `house` | `on` opens rounds, runs the agents and answers duels; `off` opens nothing new and posts no prices for players, but still settles and closes the rounds that already ran, which hands their rent back |
-| `agents` | `on-demand` (until launch): trade only in rounds a human or another outside player has joined, and in duels; `always`: play every round; `off`: never trade |
+| `agents` | `always` (the current setting): play every round and every duel; `on-demand`: trade only in rounds a human or another outside player has joined, and in duels; `off`: never trade |
 
 ### Deployment
 
